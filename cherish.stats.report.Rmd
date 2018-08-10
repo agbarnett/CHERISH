@@ -1,0 +1,918 @@
+---
+title: "CHERISH: Collaborative for Hospitalised Elders Reducing the Impact of Stays in Hospital: preliminary report using scrambled intervention"
+author: "Adrian Barnett"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning=FALSE, message=FALSE, error=FALSE, comment='', dpi=400)
+options(width=1000) # Wide pages
+this.dir = getwd()
+Missing = function(x) base::sum(is.na(x))
+Mean = function(x) base::mean(x, na.rm=TRUE)
+Median = function(x) stats::quantile(x, probs=0.5, na.rm=TRUE)
+Q1 = function(x) stats::quantile(x, probs=0.25, na.rm=TRUE)
+Q3 = function(x) stats::quantile(x, probs=0.75, na.rm=TRUE)
+Min = function(x) base::min(x, na.rm=TRUE)
+Max = function(x) base::max(x, na.rm=TRUE)
+Sum = function(x) base::sum(x, na.rm=TRUE)
+SD = function(x) stats::sd(x, na.rm=TRUE)
+N = function(x) base::length(x)
+library(survival)
+library(doBy)
+library(reshape2)
+library(tables)
+library(broom)
+library(naniar) # for missing value summary
+library(lme4) # for logistic regression with wards
+library(geepack) # for logistic GEE
+library(pander)
+panderOptions('table.emphasize.rownames', FALSE)
+panderOptions('keep.trailing.zeros', TRUE)
+panderOptions('table.split.table', Inf)
+panderOptions('table.split.cells', Inf)
+panderOptions('big.mark', ',')
+library(ggplot2)
+library(cmprsk)
+library(mitools) # for combining estimates from imputed data
+cbPalette = c("#999999", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+## main data:
+load('Analysis.Ready.RData') # from MakeDataAug2018.R
+# scramble ward (turn off when ready)
+scramble = T # actual scramble happens later after descriptive
+# primary outcome variables, used a lot below
+hacop.vars = c(
+'DELIRIUM_NEW',
+'HOSPITAL_ASSOCIATED_FUNCTIONAL_DECLINE',
+'HOSPITAL_ASSOCIATED_INCONTINENCE',
+'FALLS_TOTAL',
+'PRESSURIE_INJURY_NEW')
+hacop.nice = c('Delirium','Functional decline','Incontinence','Falls','Pressure injury') # nice labels for five outcomes
+# data for baseline analysis
+for.baseline = dplyr::filter(data, source01 == 'Post-intervention') # just post-intervention data
+# function to round with trailing zeros
+roundz  = function(x, digits=0){formatC( round( x, digits ), format='f', digits=digits)}
+```
+
+# Scrambled intervention group
+
+This document contains the statistical analyses for the CHERISH study. The initial document was produced using a scrambled intervention group by randomly assigning participants to intervention or control wards. We also scrambled the continuous variable of time-since the intervention and the categorical variable for pre- and post-intervention periods because of the potential correlation between these variables and the intervention group. This allowed us to finalise the statistical analyses plan and ensure that all investigators understood the analyses before the real intervention was used.
+
+The descriptive statisics at baseline are presented using the real intervention groups as this does not influence the choice of the final analysis.
+We do not use statistical tests to compare the two randomised groups at baseline as such tests are hard to interpret and are not recommended by the CONSORT guidelines.
+
+## Software
+
+This report and the statistical analysis were made using Rmarkdown with R version 3.4.4 (R Core Team 2018). The Bayesian models were fitted using JAGS version 4.2 (Plummer 2003).
+
+## Descriptive statistics at baseline
+
+This section contains descriptive statistics on the two groups at baseline.
+The comparisons are for the post-intervention groups only, as this matches the primary analysis comparison.
+We do not test for statistical differences between the groups as recommended by the CONSORT guidelines.
+
+## Baseline tables
+
+### Categorical variables at baseline (post-intervention only)
+
+```{r mega.table.cat}
+# make categorical variables
+for.baseline$ADL.cat = factor(as.numeric(for.baseline$ADL_BASELINE>=1), levels=0:1, labels=c('No','Yes'))
+for.baseline$IADL.cat = factor(as.numeric(for.baseline$IADL_BASELINE>=1), levels=0:1, labels=c('No','Yes'))
+# table
+cat.tab = tabular( (Heading('Gender')*gender + 
+                    Heading('Usual place of residence')*usual_res +
+                    Heading('Admission type')*adm_cat + 
+                    Heading('At nutrition risk (MST ≥ 2)')*MALNUTRITION_RISK +
+                    Heading('Depressed mood (PHQ2 score 3+)')*DEPRESSED +
+                    Heading('Needed assistance with 1 or more ADL 2 weeks prior to admission')*ADL.cat +
+                    Heading('Needed assistance with 1 or more IADL 2 weeks prior to admission')*IADL.cat +
+                    Heading('One or more hospital admissions in past 6 months')*adm_6m_prior
+                     )~(Heading('')*INTERVENTION.factor)*((n=1) +   Heading('%')*Percent('col')*Format(digits=0)), data=for.baseline) 
+pander(cat.tab)
+```
+
+### Continuous variables at baseline (post-intervention only)
+
+```{r mega.table.cont}
+cont.tab = tabular((Heading('Age (years)')*age + Heading('Charlson co-morbidity score unadjusted')*CCI_UNADJUSTED_FOR_AGE + Heading('Number of medications at admission')*presc_meds + Heading('SPMSQ score at admission')*SPMSQ_SCORE_ADMISSION + Heading('ADL at admission')*ADL_ADMISSION )~ (Heading(' ')*INTERVENTION.factor)*(Missing + N + Mean*Format(digits=2) + SD*Format(digits=2)), data=for.baseline)
+pander(cont.tab)
+```
+
+The table gives the mean and standard deviation.
+The two groups appeared similar at baseline.
+
+### Summary statistics for dates
+
+Dates are presented as Year-Month-Day.
+
+```{r baseline.dates}
+# To fix, squeeze fonts
+cont.tab = tabular(Heading('Ward')*ward*(Heading('Baseline')*d_baseline + Heading('Hospital discharge date')*d_hosp_dc) ~ (N+Mean +Min+ Max), data=for.baseline)
+pander(cont.tab)
+```
+
+
+### Distributions of continuous variables at baseline
+
+```{r baseline.distributions, fig.width=8, fig.height=7}
+cont.vars = c('age.category','SPMSQ_SCORE_ADMISSION','IADL_BASELINE','ADL_BASELINE','CCI_UNADJUSTED_FOR_AGE') # 
+# use bar chart for age
+age.breaks = c(65, 70, 75, 80, 85, 90, 95, 100)
+labels = NULL
+for (k in 1:(length(age.breaks)-1)){
+  labels = c(labels, paste('[', age.breaks[k], '-', age.breaks[k+1], ')', sep=''))
+}
+for.baseline$age.category = as.numeric(cut(for.baseline$age, breaks = age.breaks))
+for.plot = subset(for.baseline, select=c('subject_num', cont.vars))
+long = melt(for.plot, id.vars='subject_num', variable.name='test', value.name='result')
+long = subset(long, is.na(result)==F)
+long1 = subset(long, test!= 'age.category') # remove age and put in separate chart below
+gplot = ggplot(data=long1, aes(x=result))+
+  geom_bar()+
+  xlab('')+
+  ylab('Frequency')+
+  facet_wrap(~test, scales='free')+
+  theme_bw()
+print(gplot)
+```
+
+```{r age, fig.width=3.7, fig.height=3}
+# separate plot for age
+long2 = subset(long, test== 'age.category') # just select age
+long2$result = factor(long2$result, levels=1:7, labels=labels) # mucks up below if used
+long2$test = 'Age group (years)'
+gplot = ggplot(data=long2, aes(x=result))+
+  geom_bar()+
+  xlab('')+
+  ylab('Frequency')+
+  facet_wrap(~test, scales='free')+
+  theme_bw()
+print(gplot)
+```
+
+### Correlations between continuous variables at baseline
+
+The table below shows the Pearson correlations between continuous variables at baseline/admission.
+If explanatory variables are strongly correlated then they may cause an issue of multicollinearity in the multiple regression model.
+
+```{r baseline.correlations}
+cont.vars[cont.vars=='age.category'] = 'age' # use continuous age in place of categorical age
+# 
+for.cor = subset(for.baseline, select=cont.vars)
+subject_num = for.baseline$subject_num # used by imputation below
+tab = cor(as.matrix(for.cor), use='pairwise.complete.obs')
+colnames(tab) = gsub('_BASELINE|_ADMISSION|_UNADJUSTED_FOR_AGE|_SCORE', '', colnames(tab)) # tidy names
+row.names(tab) = gsub('_BASELINE|_ADMISSION|_UNADJUSTED_FOR_AGE|_SCORE', '', row.names(tab))
+pander(tab, digits=2, style='simple')
+# text 
+text.corr = roundz(tab[3,4], digits=2)
+```
+
+The strongest correlation was a positive correlation between IADL and ADL of `r text.corr`.
+
+## Missing data
+
+### Table of missing data for the key variables (ordered by high to low missing; post-intervention period only)
+
+```{r missing.summary}
+key.vars = c(hacop.vars, 'age', 'gender', 'ward', 'adm_cat', 'MALNUTRITION_RISK', 'DEPRESSED', 'INTERVENTION', 'CCI_UNADJUSTED_FOR_AGE', 'presc_meds', 'SPMSQ_SCORE_ADMISSION', 'ADL_ADMISSION',
+             'source01','dc_dest_hosp', 'dc_dest', 'LOS_TOTAL')
+to.table = miss_var_summary(dplyr::select(for.baseline, key.vars))
+pander(dplyr::select(to.table, -n_miss_cumsum), digits=2)
+```
+
+### Imputing missing variables 
+
+```{r impute, include=F}
+library(mice)
+impute.run = FALSE # set to false to save time if analyses have already been created (created 6-Aug-2018)
+source('impute.mice.R') # 
+```
+
+There is a small amount of missing data for the important baseline variables of SPMSQ and IADL.
+We imputed this missing data using Multivariate Imputation by Chained Equations (MICE) (van Buuren and Groothuis-Oudshoorn 2011).
+To maximise the information available for this imputation, we used both the pre- and post-intervention periods.
+We created five imputed data sets and ran the analysis separately on all five sets, and then combined them using the "mitools" library (Lumley 2014).
+Five imputed data sets was sufficient because the proportion of missing data was relatively small.
+
+```{r impute.plot}
+print(iplot) 
+```
+
+The above plots show the observed and imputed data.
+
+```{r scramble, include=FALSE}
+# scramble from now on
+if(scramble==T){
+  set.seed(12345)
+  data$INTERVENTION = sample(data$INTERVENTION, size=nrow(data), replace=F)
+  data$INTERVENTION.factor = sample(data$INTERVENTION.factor, size=nrow(data), replace=F)
+  data$source01 = sample(data$source01, size=nrow(data), replace=F)
+  data$time.since = sample(data$time.since, size=nrow(data), replace=F)
+}
+```
+
+### Examining missing outcomes
+
+Here we examine missing data for the primary outcomes to assess potential bias in the results.
+There was no missing data for the primary outcome of length of stay, hence this variable was not examined.
+There was some missing data for two of the five binary outcomes (see table below).
+The 94 patients missing data were the same for the two variables of functional decline and incontinence
+
+##### Table of missing for the five HAC-OP variables (pre- and post-intervention data)
+
+```{r table.missing}
+missing.tab = tabular( 
+  Heading('Delirium')*DELIRIUM_NEW + 
+  Heading('Functional decline')*HOSPITAL_ASSOCIATED_FUNCTIONAL_DECLINE + 
+  Heading('Incontinence')*HOSPITAL_ASSOCIATED_INCONTINENCE + 
+  Heading('Falls')*FALLS_TOTAL + 
+  Heading('Pressure injury')*PRESSURIE_INJURY_NEW 
+                     ~((n=1) + Missing), data=data) 
+pander(missing.tab)
+```
+
+##### Table of missing HAC-OP outcome by ward
+
+```{r table.missing.ward}
+data$missing = is.na(data$HOSPITAL_ASSOCIATED_INCONTINENCE) # can just use one variable, as missing was same for functional decline
+missing.tab2 = tabular( 
+  Heading('Ward')*ward
+                     ~Heading('Missing')*factor(missing)*((n=1) + Percent('row')), data=data) 
+pander(missing.tab2, digits=0)
+```
+
+There were some missing HAC-OP outcomes in every ward.
+
+##### Logistic regression model of missing
+
+We use logistic regression to examine the missing outcome data and see what variables predict missing using treatment group, age, gender, Charlson comorbidity score, admission ADL status and admission cognitive status (SPMSQ score). We adjust for ward clustering using a random intercept. We use the pre- and post-intervention data.
+
+```{r logistic.missing}
+# use standardised predictors
+mmodel = glmer(missing ~ INTERVENTION + I((age-76)/10) + I(gender=="Male") + I((CCI_UNADJUSTED_FOR_AGE-2)/2) + I((SPMSQ_SCORE_ADMISSION-8)/3) + I(ADL_ADMISSION>0) + (1|ward), data=data, family=binomial())
+ci = exp(confint(mmodel, method='Wald')) # confidence interval; make into odds ratios
+colnames(ci) = c('lower','upper')
+msummary = tidy(mmodel)
+msummary$estimate = exp(msummary$estimate ) # odds ratio
+index = grep('Intercept', msummary$term, invert=TRUE) # remove intercepts
+msummary = msummary[index,]
+msummary = cbind(msummary, ci[3:8,])
+row.names(msummary) = NULL
+msummary$CI = paste(roundz(msummary$lower,2), ' to ', roundz(msummary$upper,2), sep='') # make CI
+msummary = dplyr::select(msummary, term, estimate, CI, p.value)
+msummary$term = c('Intervention','Age (+10 years)','Gender = Male','Charslon (+2)','SPMSQ (+3)','ADL (Any vs none)') # Nicer labels
+names(msummary) = c('Variable','OR','CI','P-value')
+pander(msummary, digits=c(0,2,0,3))
+# "If strong associations exist we will use inverse-probability weighting to adjust the primary and secondary outcomes to compensate for the non-random missingness. This will be an additional sensitivity analysis."
+```
+
+The table shows the odds ratios and 95% confidence intervals.
+There were no clear associations between any of the predictors and the probability of the outcomes being missing.
+
+# Primary outcomes
+
+# Time to discharge (primary outcome)
+
+A primary outcome is time to discharge (length of stay) which we model using survival analysis so patients who died in hospital can be censored.
+Survival analysis examines the time to events and results are presented as hazard ratios which compare the hazard in one group relative to another, for example the hazard ratio of discharge for men compared with women. Hazard ratios are a multiplicative measure similar to a relative risk. We also give an alternative additive measure of the median time to discharge.
+
+## Competing risks plot for discharge and in-hospital death
+
+The plot below shows the cumulative incidence of the competing risks of discharge and in-hospital death for the control and intervention groups.
+The data are the post-intervention period only.
+The plot does not adjust for other known predictors, such as age.
+The small number of deaths means any differences between the estimates for cumulative deaths should be treated with caution.
+
+```{r cmprsk.primary, fig.width=10, fig.height=6}
+for.cmprsk = subset(data, source01 == 'Post-intervention') # just post-intervention data
+fstatus = as.numeric(for.cmprsk$dc_dest_hosp=='Deceased') + 1 # 1 = alive, 2 = dead
+cuminc = cuminc(ftime=for.cmprsk$LOS_TOTAL, fstatus=fstatus, group=for.cmprsk$INTERVENTION)
+ptype = 'two groups'
+source('plot.cuminc.R')
+print(gplot)
+```
+
+Over half the patients had been discharged by day the end of seven.
+
+## Number of in-hospital deaths per group
+
+The table below shows the number of deaths and discharges by group during the post-intervention period.
+
+```{r table.death}
+fstatus.nice = c('Discharged','Died')[fstatus]
+INTERVENTION.nice = c('Control','Intervention')[for.cmprsk$INTERVENTION+1]
+for.table = data.frame(died=fstatus.nice, intervention=INTERVENTION.nice)
+tab = tabular(Heading('')*intervention + 1 ~ Heading('')*died*((n=1) + Percent('row')*Format(digits=0)), data=for.table)
+pander(tab)
+# chi-squared test
+tab = table(INTERVENTION.nice, fstatus.nice)
+chisq = chisq.test(tab)
+```
+
+We tested for an association between the intervention and in-hospital death using a Chi-squared test which gives a p-value of `r format.pval(chisq$p.value, eps=0.001, digits=2)`.
+
+## Survival model for time to discharge (primary outcome)
+
+```{r primary.outcome.jags, include=F}
+time.interaction = -99 # no time interaction
+otype = 'primary'
+#source('bugs.model.R') # now use JAGS on lyra instead of winbugs ...
+source('prepare.jags.model.R') # now use JAGS
+source('prepare.jags.results.R') # read results from JAGS
+rss.no.time = res # store residual sum of squares for later comparison
+# calculate mean p-value over imputations (not used)
+pval.means = summaryBy(data=pvals, pvalue~ row, FUN=c(mean, sd))
+```
+
+We used a Bayesian survival model because we needed to adjust for: i) censoring due to death, ii) having correlated data from the same ward, and iii) the patient-level predictors of:
+
+* Age
+
+* Gender
+
+* ADL at admission, as a binary variable of zero or greater than zero 
+
+* SPMSQ score at admission
+
+* Charlson comorbidity index
+
+It can be difficult to fit such models using standard statistical modelling.
+
+We initially modelled the within-ward and within-hospital correlation in survival times using random intercepts.
+Early results using the scrambled data showed that the colinearity was too great when both ward and hospital intercepts were included, hence we removed the hospital intercepts and kept the more detailed ward level intercept.
+
+Bayesian models use a parametric survival model based on time to failure which we modelled using the Weibull distribution.
+Bayesian models give results in terms of credible intervals instead of confidence intervals, however credible intervals are easier to interpret as a 95% credible interval for the hazard ratio has a 95% probability of containing the true hazard ratio.
+Using a Bayesian model allowed us to generate the median survival time together with 95% credible intervals.
+Bayesian p-values are also far easier to interpret than standard p-values.
+
+The model used a burn-in and sample size `r MCMC` and the chains were thinned by `r thin`.
+We used two chains and visually checked the convergence.
+
+Because patients were only included if they were still admitted on day 3 we examined survival from the end of day 2 onwards.
+
+#### Hazard ratios and 95% credible intervals for discharge
+
+The table below shows the hazard ratios and 95% credible intervals for the survival model.
+The results use the imputed data.
+
+```{r primary.outcome.table}
+imputed = T # switch for using imputed vs non-imputed analysis (should always be imputed, but kept for old non-imputed code)
+if(imputed == F){
+  # table (not imputed)
+  parms = data.frame(exp(bugs.results$summary[ ,c(1,3,7)])) # exponentiate to give HRs
+  names(parms) = c('Mean','Lower','Upper')
+  parms$var = rownames(parms)
+  rownames(parms) = NULL
+}
+if(imputed == T){ #
+  # table (imputed)
+  parms = subset(mi.res, select=c('results','(lower','upper)'))
+  names(parms) = c('Mean','Lower','Upper')
+  parms$var = paste('beta', 1:nrow(parms), sep='')
+  parms$Mean = exp(parms$Mean) # exponentiate to give HRs
+  parms$Lower = exp(parms$Lower)
+  parms$Upper = exp(parms$Upper)
+}
+parms$CI = paste(roundz(parms$Lower,2), ' to ', roundz(parms$Upper,2), sep='') # make confidence interval
+parms = subset(parms, select=c('var','Mean','CI'))
+# remove intercept
+index = grep('1', parms$var, invert=TRUE)
+parms = parms[index, ]
+# change row names (see winbugs model for index numbers)
+parms$var[grep('2', parms$var)] = 'Age (+10 years)'
+parms$var[grep('3', parms$var)] = 'Gender (Male vs Female)'
+parms$var[grep('4', parms$var)] = 'ADL (Any vs None)'
+parms$var[grep('5', parms$var)] = 'SPMSQ (+3)'
+parms$var[grep('6', parms$var)] = 'Charlson comorbidity index (+2)'
+parms$var[grep('7', parms$var)] = 'Intervention (Yes vs No)'
+names(parms) = c('Predictor','Mean','95% CI')
+rownames(parms) = NULL
+# output table
+pander(parms, style='simple', digits=2, justify=c('right','left','left'))
+```
+
+The hazard ratio per 10 year increase in age was less than 1, which means older patients stayed longer in hospital.
+SPMSQ was a linear explanatory variable and we scaled it to a +3 increase as this is the observed inter-quartile range. Hence the estimated change in risk is for a reasonable size increase in exposure. The Charlson comorbidity index was scaled to its observed inter-quartile range of 2.
+
+```{r primary.shape, include=F}
+# Weibull shape parameter (just use one of the imputed results)
+shape.show = as.numeric(subset(shape, chain==99, select=c('mean','lower','upper')))
+mean.shape = roundz(shape.show[1],2)
+lower.shape = roundz(shape.show[2],2)
+upper.shape = roundz(shape.show[3],2)
+```
+
+The estimated shape parameter in the Weibull distribution had a mean of `r mean.shape` with a 95% credible interval of `r lower.shape` to `r upper.shape`.
+A shape parameter below 1 corresponds to a lower hazard of discharge over time, which can be seen in the cumulative risk plot above.
+
+#### Differences in median times to discharge from admission
+
+The differences in the median times to discharge and 95% credible intervals are shown in the table below.
+
+```{r primary.median.times}
+# just using the most recent result
+medians = subset(diff, chain==99, select=c('node','mean','lower','upper','pvalue'))
+names(medians) = c('var','Mean','Lower','Upper','pvalue')
+rownames(medians) = NULL
+# add back 2.9 days to medians (not difference); no longer needed, just using difference
+#index = grep('median', medians$var)
+#medians$Mean[index] = medians$Mean[index] + 2.9
+# prepare table
+medians$CI = paste(roundz(medians$Lower,2), ' to ', roundz(medians$Upper,2), sep='') # make confidence interval
+medians = subset(medians, select=c('var','Mean','CI','pvalue'))
+medians$pvalue = format.pval(medians$pvalue, eps=0.001, digits=3)
+# change row names
+medians$var = as.character(medians$var)
+medians$var[grep('1', medians$var)] = 'Age (+10 years)'
+medians$var[grep('2', medians$var)] = 'Gender (Male vs Female)'
+medians$var[grep('3', medians$var)] = 'ADL (Any vs None)'
+medians$var[grep('4', medians$var)] = 'SPMSQ (+3)'
+medians$var[grep('5', medians$var)] = 'Charlson comorbidity index (+2)'
+medians$var[grep('6', medians$var)] = 'Intervention (Yes vs No)'
+names(medians) = c('Variable','Median (days)','95% CI (days)','Pvalue')
+rownames(medians) = NULL
+# output table
+pander(medians, style='simple', digits=2, justify=c('right','left','left','left'))
+# age for text below (as percent increase)
+age.text = medians[1,2]
+# example p-value used in text below
+age.text = roundz(age.text, 1)
+age.pval = as.numeric(medians[1,4])
+```
+
+Older age was associated with an increased time to discharge of `r age.text` days on average per 10 year increase in age.
+The probability that older age is associated with an increased length of stay is `r age.pval`.
+Higher SPMSQ scores were associated with a reduced time to discharge.
+
+#### Summary statistics for length of stay
+
+```{r primary.los.table}
+cat.disc.primary = tabular((
+  Heading('Length of unit stay')*LOS_UNIT +
+  Heading('Length of total hospital stay')*LOS_TOTAL
+  )~ (Heading(' ')*INTERVENTION.factor+1)*(Median*Format(digits=2) + Q1*Format(digits=2)  + Q3*Format(digits=2)), data=for.baseline)
+pander(cat.disc.primary)#, style='simple')
+```
+
+Medians and inter-quartile ranges (Q1 to Q3).
+
+#### Table of discharge destination 
+
+```{r primary.discharge.table}
+cont.tab.primary = tabular((
+  Heading('Discharge destination from the index care team')*dc_dest +
+  Heading('Discharge destination from hospital or other healthcare facility')*dc_dest_hosp
+ )~(Heading('')*INTERVENTION.factor)*((n=1) + Heading('%')*Percent('col')*Format(digits=0)),   
+ data=for.baseline)
+pander(cont.tab.primary)
+```
+
+#### Death or discharge to institutional care (new residential care, continuing acute, rehabilitation or convalescent care) versus discharge home (secondary outcome)
+
+Here we examine the discharge destination from the index care team.
+The table below shows the odds ratio and 95% confidence interval for the odds of going home compared with all other destinations (the two "usual residence" categories in the previous table).
+We exclude those patients who died, as they are examined in a separate analysis of deaths.
+
+```{r destination}
+optimal.groups = c('Usual residence (community)','Usual residence (RACF))')
+for.baseline$dc_binary = as.numeric(for.baseline$dc_dest %in% optimal.groups)
+for.baseline = dplyr::filter(for.baseline, dc_dest != 'Deceased') # remove deaths
+dmodel = glmer(dc_binary ~ INTERVENTION + I((age-76)/10) + I(gender=="Male") + I((CCI_UNADJUSTED_FOR_AGE-2)/2) + I((SPMSQ_SCORE_ADMISSION-8)/3) + I(ADL_ADMISSION>0) + (1|ward), data=for.baseline, family=binomial())
+ci = exp(confint(dmodel, method='Wald')) # confidence interval; make into odds ratios
+colnames(ci) = c('lower','upper')
+msummary = tidy(dmodel)
+msummary$estimate = exp(msummary$estimate ) # odds ratio
+index = grep('Intercept', msummary$term, invert=TRUE) # remove intercepts
+msummary = msummary[index,]
+msummary = cbind(msummary, ci[3:8,])
+row.names(msummary) = NULL
+msummary$CI = paste(roundz(msummary$lower,2), ' to ', roundz(msummary$upper,2), sep='') # make CI
+msummary = dplyr::select(msummary, term, estimate, CI, p.value)
+msummary$p.value = format.pval(msummary$p.value, eps=0.001, digits=3)
+msummary$term = c('Intervention','Age (+10 years)','Gender = Male','Charslon (+2)','SPMSQ (+3)','ADL (Any vs none)') # Nicer labels
+names(msummary) = c('Variable','OR','CI','P-value')
+pander(msummary, digits=c(0,2,0,3))
+# age for text below 
+age.text = roundz(msummary$OR[2], 2)
+```
+
+The odds of going home decreased greatly with increase age (OR = `r age.text` per 10 year increase in age).
+
+
+# Composite outcome of "hospital associated complication of older people" HAC-OP (primary outcome)
+
+We examine the five binary outcomes of:
+
+*	Hospital-associated delirium (delirium documented either by assessment or chart review, first recorded more than 1 day after admission) 
+
+* Hospital-associated functional decline (increase in count of ADL requiring human assistance at discharge compared to 2 weeks prior to admission, by patient self-report; or in-hospital death or new residential care)  
+
+* Hospital-associated incontinence (urinary or faecal incontinence present at discharge which was not present 2 weeks prior to admission, by patient self-report) 
+
+* Hospital-associated pressure ulcer (identified by patient report or chart documentation, not present at admission assessment)  
+
+* Hospital-associated fall (identified by patient report or chart documentation after admission)
+
+We use the post-intervention period data only.
+
+#### Within-patient correlation in "hospital associated complication of older people"
+
+We first look at the within-patient correlation in the five binary outcomes using Pearson correlation.
+Pearson correlation will underestimate the strength of the correlation for binary data, but it gives an indication of the direction of the correlation (negative or positive) and the relative size of the correlation.
+
+```{r patient.corr}
+composite = as.matrix(subset(for.baseline, select=hacop.vars))
+cor = cor(composite, method='pearson', use='pairwise.complete.obs')
+colnames(cor) = gsub('_ANY_TOTAL|_TOTAL|.cat', '', colnames(cor))
+row.names(cor) = gsub('_ANY_TOTAL|_TOTAL|.cat', '', row.names(cor))
+# change names again (used to squeeze results into Word document)
+colnames.text = colnames(cor)
+short.letters = c('DE','FD','IN','FA','PI')
+colnames(cor) = row.names(cor) = short.letters
+pander(cor, style='simple', digits=2)
+```
+
+Key: `r paste(short.letters,'=', hacop.nice, collapse=', ')`.
+
+The strongest correlation was between delirium and functional decline.
+The weakest correlation was between pressure injury and falls.
+
+#### Logistic regression model of "hospital associated complication of older people" (primary outcome)
+
+We use a generalised estimating equation (GEE) assuming a binary (logistic) outcome to model the probability of the five binary outcomes that comprise hospital associated complication of older people.
+We include an unstructured covariance to model the correlation between the syndromes for the same patient as demonstrated in the table above.
+We adjust for the explanatory variables of age, gender, Charlson comorbidity score, admission ADL status and admission cognitive status (SPMSQ score).
+Because of the missing data for SPMSQ score, we use the five imputed data sets and present the results of the combined model.
+
+We assume the intervention has the same multiplicative effect on the odds of each syndrome. In a secondary analysis (below) we allow the intervention effect to vary by syndrome.
+
+An alternative modelling strategy would have been a separate logistic regression for each syndrome. However, this would create multiple outputs to interpret and the syndromes are clearly correlated as shown above. Another alternative would be to count the number of syndromes per patient and use Poisson regression. However, the assumption of independent counts is clearly violated as shown by the correlation matrix above. Another alternative would be to look at any syndrome versus none, the advantage of which is that it would use a single logistic regression and hence be easier to explain. The disadvantage of this method is that it ignores potentially important severity information, as a patient who developed one syndrome in hospital is classed the same as a patient who developed all five.
+
+We only use the post-intervention data.
+
+```{r composite.primary, include=F}
+## Non-Bayesian version
+otype = 'primary'
+betas = vars = NULL # means and variances for imputed results
+for (k in 1:5){ # loop through imputations
+  # add imputed data
+  data.to.use = data
+  if(otype %in% c('varying','primary')){
+    data.to.use = for.baseline # post-intervention data only
+  }
+  data.to.use = dplyr::select(data.to.use, -IADL_BASELINE, -SPMSQ_SCORE_ADMISSION) # remove missing variables
+  data.to.use = merge(data.to.use, impute[[k]], by='subject_num')
+  ## set up data
+  data.to.use$age.c = (data.to.use$age -76)/10 # standardised for regression
+  data.to.use$CCI_UNADJUSTED_FOR_AGE.c = (data.to.use$CCI_UNADJUSTED_FOR_AGE -2)/2 # standardised for regression
+  data.to.use$SPMSQ_SCORE_ADMISSION.c = (data.to.use$SPMSQ_SCORE_ADMISSION-8)/3 # minus median, divide by IQR
+# switch data to long
+  for.melt = dplyr::select(data.to.use, subject_num, ward, INTERVENTION, gender, age.c, ADL_ADMISSION, CCI_UNADJUSTED_FOR_AGE.c, SPMSQ_SCORE_ADMISSION.c, hacop.vars)
+  long = melt(for.melt, id.vars=c('subject_num','ward','INTERVENTION', 'gender','age.c','ADL_ADMISSION','CCI_UNADJUSTED_FOR_AGE.c', 'SPMSQ_SCORE_ADMISSION.c'), variable.name = 'syndrome', value.name = 'binary')
+  long$id = as.numeric(as.factor(long$subject_num)) # sort on a numeric ID for geeglm
+  long = dplyr::arrange(long, id)
+  ## GEE
+  # adjusting for ward caused crash
+  gmodel = geeglm(binary ~ INTERVENTION + gender + age.c + I(ADL_ADMISSION>0) + CCI_UNADJUSTED_FOR_AGE.c + SPMSQ_SCORE_ADMISSION.c, id=id, data=long, family=binomial(), corstr = 'unstructured')
+  betas[[k]] = gmodel$coefficients # estimates (log odds ratios)
+  vars[[k]] = gmodel$geese$vbeta # Variance-covariance matrix
+}
+# combine imputed results
+mi.res = summary(MIcombine(betas, vars))
+```
+
+##### Table of odds ratios and 95% confidence intervals
+
+```{r gee.table}
+mi.res$Variable = ''
+mi.res$Variable[row.names(mi.res)=='age.c'] = 'Age (+10 years)'
+mi.res$Variable[row.names(mi.res)=='genderFemale'] = 'Gender (Male vs Female)'
+mi.res$Variable[row.names(mi.res)=='I(ADL_ADMISSION > 0)TRUE'] = 'ADL (Any vs None)'
+mi.res$Variable[row.names(mi.res)=='SPMSQ_SCORE_ADMISSION.c'] = 'SPMSQ (+3)'
+mi.res$Variable[row.names(mi.res)=='CCI_UNADJUSTED_FOR_AGE.c'] = 'Charlson comorbidity index (+2)'
+mi.res$Variable[row.names(mi.res)=='INTERVENTION'] = 'Intervention (Yes vs No)'
+mi.res$results = exp(mi.res$results) # make into odds ratio
+mi.res$lower = exp(mi.res$`(lower`)
+mi.res$upper = exp(mi.res$`upper)`)
+mi.res$CI = paste(roundz(mi.res$lower,2), ' to ', roundz(mi.res$upper,2), sep='') 
+mi.res = subset(mi.res, Variable!='', select=c('Variable','results',"CI"))
+names(mi.res)[2] = 'OR'
+row.names(mi.res) = NULL
+pander(mi.res, style='simple', digits=3, align=c('right','left','left'))
+# age for text below
+age.text = dplyr::filter(mi.res, Variable == 'Age (+10 years)')$OR
+```
+
+Older age was associated with an increased probability of hospital-acquired geriatric syndrome. Each ten year increase in age increased the odds of the five outcomes by `r roundz(age.text,2)`.
+
+
+#### Geriatric syndromes present at time of hospital admission 
+
+```{r syndrome.admission.table}
+for.baseline$DELIRIUM_ADMISSION = factor(for.baseline$DELIRIUM_ADMISSION, levels=0:1, labels=c('No','Yes'))
+for.baseline$PRESSURE_INJURY_ADMISSION = factor(for.baseline$PRESSURE_INJURY_ADMISSION, levels=0:1, labels=c('No','Yes'))
+for.baseline$ADL_ADMISSION.cat = factor(as.numeric(for.baseline$ADL_ADMISSION>=1), levels=0:1, labels=c('No','Yes'))
+cat.tab.primary = tabular((
+  Heading('Any ADL impairment at admission')*ADL_ADMISSION.cat +
+  Heading('Delirium at admission')*DELIRIUM_ADMISSION + 
+  Heading('Urinary incontinence at admission')*adm_incont_urine + 
+  Heading('Faecal incontinence at admission')*adm_incont_faeces + 
+  Heading('Falls in previous 6 months')*m6_prior_falls + 
+  Heading('Pressure injury at admission')*PRESSURE_INJURY_ADMISSION
+ )~(Heading('')*INTERVENTION.factor+1)*((n=1) + Heading('%')*Percent('col')*Format(digits=0)),   
+ data=for.baseline)
+pander(cat.tab.primary)
+```
+
+##### Mean and standard deviation for ADL impairment at admission
+
+```{r syndrome.admission.table2}
+cont.tab.primary = tabular((  Heading('')*ADL_ADMISSION)~(Heading('')*INTERVENTION.factor+1)*(Mean*Format(digits=2) + SD*Format(digits=3)), data=for.baseline)
+print(cont.tab.primary)
+```
+
+
+##### Mean and standard deviation for ADL impairment at discharge
+
+```{r syndrome.stay.table2}
+cont.tab.primary.stay = tabular((
+  Heading('')*ADL_DC)~(Heading('')*INTERVENTION.factor+1)*(Mean*Format(digits=2) + SD*Format(digits=3)),   
+ data=for.baseline)
+print(cont.tab.primary.stay)
+```
+
+# Secondary outcomes
+
+### Competing risks plot for discharge and death (secondary outcome)
+
+The plot below shows the cumulative incidence of the competing risks of discharge and in-hospital death for the control and intervention groups.
+The plot does not adjust for potential confounders, such as age.
+This plot uses both the pre- and post-intervention data, whereas the previous cumulative incidence plot just used the post-intervention data.
+
+```{r cmprsk.secondary, fig.width=11, fig.height=6}
+for.cmprsk = data # both pre and post-intervention data
+fstatus = as.numeric(for.cmprsk$dc_dest_hosp=='Deceased') + 1 # 1 = alive, 2 = dead
+# make group of 4 (one intervention and three controls)
+for.cmprsk$four.group = paste(for.cmprsk$source01, '.', for.cmprsk$INTERVENTION, sep='')
+levels = c('Post-intervention.0','Post-intervention.1','Pre-intervention.0','Pre-intervention.1')
+labels = c('Post-intervention, control', 'Post-intervention, intervention', 'Pre-intervention, control', 'Pre-intervention, intervention')
+for.cmprsk$four.group = factor(for.cmprsk$four.group, levels=levels, labels=labels)
+cuminc = cuminc(ftime=for.cmprsk$LOS_TOTAL, fstatus=fstatus, group=for.cmprsk$four.group)
+ptype = 'four groups'
+source('plot.cuminc.R')
+print(gplot)
+```
+
+### Survival model for time to discharge with pre-intervention data (secondary outcome)
+
+Here we look at time to discharge again, but this time include the pre-intervention data.
+This model will have greater power as we have more data on discharge patterns during non-intervention periods.
+However, there is a concern that this analysis is somewhat biased because there has been a steady reduction in length of stay over time.
+
+```{r secondary.outcome.jags, include=F}
+otype = 'secondary'
+time.interaction = -99
+source('prepare.jags.model.R') # using JAGS on lyra, run.secondary.-99.##.R
+source('prepare.jags.results.R') # 
+```
+
+The table below shows the hazard ratios and 95% credible intervals for discharge.
+
+```{r secondary.outcome.table}
+# table
+  parms = subset(mi.res, select=c('results','(lower','upper)'))
+  names(parms) = c('Mean','Lower','Upper')
+  parms$var = paste('beta', 1:nrow(parms), sep='')
+  parms$Mean = exp(parms$Mean) # exponentiate to give HRs
+  parms$Lower = exp(parms$Lower)
+  parms$Upper = exp(parms$Upper)
+parms$CI = paste(roundz(parms$Lower,2), ' to ', roundz(parms$Upper,2), sep='') # make confidence interval
+parms = subset(parms, select=c('var','Mean','CI'))
+# remove intercept
+index = grep('1', parms$var, invert=TRUE)
+parms = parms[index, ]
+# change row names (see winbugs model for index numbers)
+parms$var[grep('2', parms$var)] = 'Age (+10 years)'
+parms$var[grep('3', parms$var)] = 'Gender (Male vs Female)'
+parms$var[grep('4', parms$var)] = 'ADL (Any vs None)'
+parms$var[grep('5', parms$var)] = 'SPMSQ (+3)'
+parms$var[grep('6', parms$var)] = 'Charlson comorbidity index (+2)'
+parms$var[grep('7', parms$var)] = 'Period (Pre-intervention vs Post)'
+parms$var[grep('8', parms$var)] = 'Intervention (Yes vs No)'
+names(parms) = c('Predictor','Mean','95% CI')
+rownames(parms) = NULL
+# output table
+pander(parms, style='simple', digits=2, justify=c('right','left','left'))
+# rename chain plot
+chain.plot.secondary = chain.plot
+```
+
+#### Differences in median times to discharge from admission with pre-intervention data (secondary outcome)
+
+The differences in the median times to discharge and 95% credible intervals are shown in the table below.
+
+```{r secondary.median.times}
+medians = subset(diff, chain==99, select=c('node','mean','lower','upper','pvalue'))
+names(medians) = c('var','Mean','Lower','Upper','pvalue')
+rownames(medians) = NULL
+# prepare table
+medians$CI = paste(roundz(medians$Lower,2), ' to ', roundz(medians$Upper,2), sep='') # make confidence interval
+medians = subset(medians, select=c('var','Mean','CI','pvalue'))
+medians$pvalue = format.pval(medians$pvalue, eps=0.001, digits = 3)
+# change row names
+medians$var = as.character(medians$var)
+medians$var[grep('1', medians$var)] = 'Age (+10 years)'
+medians$var[grep('2', medians$var)] = 'Gender (Male vs Female)'
+medians$var[grep('3', medians$var)] = 'ADL (Any vs None)'
+medians$var[grep('4', medians$var)] = 'SPMSQ (+3)'
+medians$var[grep('5', medians$var)] = 'Charlson comorbidity index (+2)'
+medians$var[grep('6', medians$var)] = 'Period (Pre-intervention vs Post)'
+medians$var[grep('7', medians$var)] = 'Intervention (Yes vs No)'
+names(medians) = c('Variable','Median (days)','95% CI (days)','Pvalue')
+rownames(medians) = NULL
+# output table
+pander(medians, style='simple', digits=c(0,1,0,3), justify=c('right','left','left','left'))
+```
+
+## Survival model for time to discharge with a time-dependent intervention effect (secondary outcome)
+
+There is a possibility that the effect of the intervention varies over the 6 month post-implementation period as the “dose” of intervention may have been increasing as the model matured. To examine this we included an interaction between the intervention and the time since intervention in each ward. The change over time may be non-linear and therefore we examined a range of non-linear shapes using the fractional polynomial approach (Royston et al 1999). The best fitting change over time was estimated using the deviance information criterion (DIC), with a smaller DIC indicating a better model.
+
+First we check the distribution of the time since implementation.
+
+```{r time.since, include=TRUE, fig.width=10}
+pnum = ifelse(scramble==T, 9, 5) # palette changes depending on scrambling 
+times = subset(data, source01=='Post-intervention' & INTERVENTION.factor=='Intervention')
+hplot = ggplot(data=times, aes(x=time.since, fill=factor(ward)))+
+  geom_histogram()+
+  xlab('Time since implementation (days)')+
+  ylab('Frequency')+
+  theme_bw()+
+  scale_fill_manual('Ward', values=cbPalette[2:pnum])
+#  theme(legend.position=c(0.9,0.8))
+print(hplot)
+```
+
+```{r secondary.outcome.jags.interaction, include=F}
+otype = 'primary' # do not include pre-intervention data for the time interaction
+# use fractional polynomials
+source('fractional.polynomial.R')
+all.res = NULL
+for (time.interaction in c(-2, -1, -0.5, 0, 0.5, 1, 2, 3)){ 
+  source('prepare.jags.model.R') # using JAGS on lyra, e.g., run.primary.-2.##.R (## = 1 to 5 for imputed data); see run.jags.primary.R
+  source('prepare.jags.results.R') # 
+  res$power = time.interaction
+  all.res = rbind(all.res, res)
+}
+```
+
+#### Mean residual sum of squares for the alternative models of change over time due to the intervention
+
+```{r rss.compare}
+## compare RSS
+# add back RSS from a model with no time interaction
+rss.no.time$power = -99
+all.res = rbind(rss.no.time, all.res)
+all.res$xaxis = factor(all.res$power, levels=c(-99, -2, -1, -0.5, 0, 0.5, 1, 2, 3), labels=c("No time", '-2', '-1', '-0.5', 'Log', '0.5', '1', '2', '3'))
+## box plot
+# add labels 
+rss.range = as.numeric(range(all.res$mean))
+labels = data.frame(x=0, y=rss.range, text=c('Better model','Worse model'), h=c(0,0))
+dplot = ggplot(data=all.res, aes(x=xaxis, y=mean))+
+  geom_boxplot()+
+  ylab('Mean residual sum of squares')+
+  xlab('Fractional polynomial')+
+  theme_bw()+
+  geom_text(data=labels, aes(x=x, y=y, label=text, hjust=h), col='black')
+dplot
+```
+
+The mean residual sum of squares was smallest for a model with a fractional polynomial power of -2. 
+There was no clear best model and we should stick with the simpler model of no interaction with time.
+
+#### Plot of the estimated change over time for the best model 
+
+The plot below shows the estimated change in the intervention effect over time using the best fractional polynomial.
+The plot shows the mean estimate (black line) and the 95% credible intervals (grey area).
+
+```{r best.model.plot}
+## Use predictions from JAGS with credible intervals
+all.res = subset(all.res, power > -99) # exclude no change
+mean.res = summaryBy(mean ~ power + xaxis, data=all.res) 
+which.best = which(mean.res$mean.mean == min(mean.res$mean.mean))
+best.power = as.character(mean.res$xaxis[which.best])
+setwd('Z:/CHERISH')
+# get estimates and time
+infile =  paste('JAGS.results.primary.', best.power, '.', 1, '.RData', sep='')
+load(infile)
+setwd(this.dir)
+to.plot = subset(time.pred, chain==99)
+to.plot$time = times
+gplot = ggplot(data=to.plot, aes(x=time, y=mean, ymin=lower, ymax=upper))+
+  geom_ribbon(alpha=0.3)+
+  geom_line(size=1.2)+
+  theme_bw()+
+  geom_hline(yintercept=1, lty=2)+
+  xlab('Days since intervention')+
+  ylab('Hazard ratio of discharge')
+gplot
+```
+
+### Logistic regression model of "hospital associated complication of older people" with a varying intervention effect across the five syndromes (secondary outcome)
+
+In the previous model we assumed that the effect of the intervention was consistent over all five syndromes. Here we allow the intervention effect to vary by fitting separate logistic regression models for each of the five syndromes.
+
+```{r logistic.individual, include=F}
+model.res = NULL
+for (j in 1:5){ # loop through five outcomes
+  formula = as.formula(paste(hacop.vars[j], '~ INTERVENTION + gender + age.c + I(ADL_ADMISSION>0) + CCI_UNADJUSTED_FOR_AGE.c + SPMSQ_SCORE_ADMISSION.c + (1|ward)', sep=''))
+  betas = vars = NULL # means and variances for imputed results
+  for (k in 1:5){ # loop through imputations
+  # add imputed data
+  data.to.use = data
+  if(otype %in% c('varying','primary')){
+    data.to.use = for.baseline # post-intervention data only
+  }
+  data.to.use = dplyr::select(data.to.use, -IADL_BASELINE, -SPMSQ_SCORE_ADMISSION) # remove missing variables
+  data.to.use = merge(data.to.use, impute[[k]], by='subject_num')
+  ## set up data
+  data.to.use$age.c = (data.to.use$age -76)/10 # standardised for regression
+  data.to.use$CCI_UNADJUSTED_FOR_AGE.c = (data.to.use$CCI_UNADJUSTED_FOR_AGE -2)/2 # standardised for regression
+  data.to.use$SPMSQ_SCORE_ADMISSION.c = (data.to.use$SPMSQ_SCORE_ADMISSION-8)/3 # minus median, divide by IQR
+  # adjusting for ward clustering
+    model = glmer(formula, data=data.to.use, family=binomial())
+    betas[[k]] = fixef(model)
+    vars[[k]] = as.matrix(vcov(model))
+  }
+# combine imputed results
+ mi.res = summary(MIcombine(betas, vars))
+ frame = mi.res[2,] # second row with intervention results
+ frame$outcome = hacop.nice[j]
+ model.res = rbind(model.res, frame)
+}
+```
+
+The table shows the mean odds ratio and 95% confidence interval.
+
+```{r table.logistic}
+parms = subset(model.res, select=c('outcome','results','(lower','upper)'))
+names(parms) = c('Outcome','Mean','Lower','Upper')
+parms$Mean = exp(parms$Mean) # exponentiate to give odds rations
+parms$Lower = exp(parms$Lower)
+parms$Upper = exp(parms$Upper)
+parms$CI = paste(roundz(parms$Lower,2), ' to ', roundz(parms$Upper,2), sep='') # make confidence interval
+parms = dplyr::select(parms, Outcome, Mean, CI)
+rownames(parms) = NULL
+# output table
+pander(parms, style='simple', digits=2, justify=c('right','left','left'))
+```
+
+# Appendix
+
+### Verifying chain convergence of the Bayesian survival model
+
+The plots below shows that the two chains converged to a common solution and mixed well.
+This plot is presented for completeness and does not need to be included in any publication.
+
+#### Primary outcome
+
+```{r chain.plot, fig.height=6, fig.width=6, dpi=200}
+print(chain.plot)
+```
+
+#### Secondary outcome
+
+```{r chain.plot.secondary, fig.height=6, fig.width=6, dpi=200}
+print(chain.plot.secondary)
+```
+
+
+# Acknowledgements
+
+The work was funded by a Queensland Government Accelerate Partnership grant between the Queensland Government, Metro North Hospital and Health Service, and Australian Centre for Health Services Innovation at the Queensland University of Technology.
+
+Computational resources and services used in this work were provided by the High Performance Computer and Research Support Group, Queensland University of Technology, Brisbane, Australia.
+
+Adrian Barnett is supported by a National Health and Medical Research Council Senior Research Fellowship (APP1117784).
+
+# References
+
+* P. Diggle, P. Heagerty, K.Y. Liang, and S. Zeger. Analysis of Longitudinal Data.
+Oxford Statistical Science Series. OUP Oxford, 2013.
+
+* Thomas Lumley (2014). mitools: Tools for multiple imputation of missing data. R package version 2.3. https://CRAN.R-project.org/package=mitools
+
+* Martyn Plummer (2003) JAGS: A program for analysis of Bayesian graphical models using Gibbs sampling
+
+* R Core Team (2018). R: A language and environment for statistical computing. R Foundation for Statistical Computing, Vienna,
+  Austria. URL https://www.R-project.org/.
+
+* P Royston, G Ambler, W Sauerbrei; The use of fractional polynomials to model continuous risk variables in epidemiology. International Journal of Epidemiology, Volume 28, Issue 5, 1 October 1999, Pages 964–974, https://doi.org/10.1093/ije/28.5.964
+
+* Stef van Buuren, Karin Groothuis-Oudshoorn (2011). mice: Multivariate Imputation by Chained Equations in R. Journal of Statistical Software, 45(3), 1-67. URL http://www.jstatsoft.org/v45/i03/.
+  
