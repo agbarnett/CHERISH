@@ -38,6 +38,6 @@ gplot = ggplot(data=subset(to.plot, time<=30), aes(x=time, y=est, col=factor(gro
   theme_bw()+
   xlab('Time since admission (days)')+
   ylab('Cumulative proportion')+
-  theme(legend.position=c(0.85, 0.5), text=element_text(size=15))+
+  theme(legend.position=c(0.85, 0.5), text=element_text(size=15), panel.grid.minor = element_blank())+
   facet_wrap(~panel, scales='free_y')+
   geom_text(data=labels, aes(x=x, y=y, label=text, hjust=h), col='black')

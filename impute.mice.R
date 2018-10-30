@@ -4,7 +4,7 @@
 # called from cherish.stats.report.Rmd
 # November 2017
 
-n.impute = 5 # number of imputed data sets
+n.impute = 20 # number of imputed data sets; upped to 20 (Oct 2018)
 
 # run or not, used to save time
 if(impute.run==FALSE){
@@ -21,7 +21,7 @@ if(impute.run==TRUE){
   for.cor = subset(data, select=cont.vars)
   
   # use MICE
-  imputed = mice(for.cor, m=n.impute, seed=123)
+  imputed = mice(for.cor, m=n.impute, seed=123) # set seed for consistent result
   imputed
   
   # add back subject number
@@ -36,7 +36,7 @@ if(impute.run==TRUE){
   index = melt(is.na(for.cor))
   names(index) = c('row','var','missing')
   to.plot = cbind(imp, index)
-  to.plot = subset(to.plot, variable %in% c('IADL_BASELINE','SPMSQ_SCORE_ADMISSION'))
+  to.plot = subset(to.plot, variable %in% c('SPMSQ_SCORE_ADMISSION')) # just SPMSQ (August 2018)
   to.plot$value = round(to.plot$value) # round for plot
   iplot = ggplot(data=to.plot, aes(x=value, fill=factor(missing)))+
     geom_bar()+
@@ -45,7 +45,7 @@ if(impute.run==TRUE){
     xlab('')+
     ylab('Frequency')+
     scale_fill_manual('Imputed', values=cbPalette[2:3], labels=c('No','Yes'))+
-    theme(legend.position=c(0.85,0.85))
+    theme(legend.position=c(0.2,0.85))
   
   # save results
   outfile = paste('MICE.Results.impute.RData', sep='')

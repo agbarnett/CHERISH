@@ -6,7 +6,7 @@ fp = function(x, power){
   # add 1 because of zeros
   if(power==0){y = log(x+1)}
   if(power!=0){y = (x+1)^power}
-  # standardise 
+  # standardise for bugs
   y = y / max(y)
   return(y)
 }

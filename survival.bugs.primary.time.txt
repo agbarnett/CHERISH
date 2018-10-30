@@ -6,17 +6,17 @@ model{
 	  isCensored[i] ~ dinterval(LOS[i], TIME_CEN[i])
       LOS[i] ~ dweib(shape, mu[i])
 	  squared.res[i] <- pow(LOS[i] - mu[i], 2) 
- log(mu[i]) <- beta[1] + beta[2]*age[i] + beta[3]*gender[i] + beta[4]*ADL[i] + beta[5]*SPMSQ[i] + beta[6]*CCI[i] + beta[7]*intervention[i] + beta[8]*intervention.time[i] + zeta.c[ward.num[i]]}
+ log(mu[i]) <- beta[1] + beta[2]*age[i] + beta[3]*gender[i] + beta[4]*ADL[i] + beta[5]*SPMSQ[i] + beta[6]*CCI[i] + beta[7]*elective[i] + beta[8]*intervention[i] + beta[9]*intervention.time[i] + zeta.c[hosp.num[i]]}
 shape ~ dexp(0.001)
       for (k in 1:n.beta){
       beta[k] ~ dnorm(0, 0.001)
       }
-      for (k in 1:n.ward){
-      zeta[k] ~ dnorm(0, tau.ward)
+      for (k in 1:n.hosp){
+      zeta[k] ~ dnorm(0, tau.hosp)
       zeta.c[k] <- zeta[k] - mu.zeta
       }    
-      tau.ward ~ dgamma(1, 1)
-      mu.zeta <- mean(zeta[1:n.ward])
+      tau.hosp ~ dgamma(1, 1)
+      mu.zeta <- mean(zeta[1:n.hosp])
       # Median times
       median[1] <- pow(log(2) * exp(-beta[1]), 1/shape); # baseline median
       for (k in 2:n.beta){
@@ -25,7 +25,7 @@ shape ~ dexp(0.001)
       }
 	# predictions   
     for (j in 1:N.pred){
-		log(time.pred[j]) <- beta[7] + beta[8]*fp.times[j]
+		log(time.pred[j]) <- beta[8] + beta[9]*fp.times[j]
 	}	
 	# Mean residual sum of squares
 	rss <- sum(squared.res[1:N])/N
