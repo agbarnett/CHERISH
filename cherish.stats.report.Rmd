@@ -41,7 +41,7 @@ library(cmprsk)
 library(mitools) # for combining estimates from imputed data
 cbPalette = c("#999999", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
 ## main data:
-load('Analysis.Ready.RData') # from MakeDataAug2018.R
+load('Analysis.Ready.RData') # from MakeDataNov2018.R
 # scramble intervention (turn off when ready)
 scramble = FALSE # actual scramble happens later after descriptive
 # five primary outcome variables, used a lot below
@@ -549,13 +549,14 @@ The plot shows the mean (closed circle) and 95% credible interval (horizontal li
 ggplot(data=subset(zeta.c, chain==99), aes(y=row, x=exp(mean), xmin=exp(lower), xmax=exp(upper)))+
   geom_vline(lty=2, xintercept=1)+
   geom_point(size=3)+
+  scale_y_continuous(trans = "reverse", breaks=1:4)+
   geom_errorbarh(height=0, lwd=1.2)+
   ylab('Hospital')+
   xlab('Hazard ratio')+
   g.theme
 ```
 
-There was a somewhat higher hazard ratio (shorter stays) hospital 1.
+There was a somewhat higher hazard ratio (shorter stays) in hospital 1.
 
 #### Summary statistics for two lengths of stay
 
@@ -745,9 +746,11 @@ This plot uses both the pre- and post-intervention data, whereas the previous cu
 for.cmprsk = data # both pre and post-intervention data
 fstatus = as.numeric(for.cmprsk$dc_dest == 'Deceased') + 1 # index outcome (not hospital); 1 = alive, 2 = dead
 # make group of 4 (one intervention and three controls)
-for.cmprsk$four.group = paste(for.cmprsk$source01, '.', for.cmprsk$INTERVENTION, sep='')
+iwards = c('Caboolture 4A','RBWH 9AN','Nambour Ortho','TPCH Thoracic')
+for.cmprsk$wards = as.numeric(for.cmprsk$ward %in% iwards) # intervention wards
+for.cmprsk$four.group = paste(for.cmprsk$source01, '.', for.cmprsk$wards, sep='')
 levels = c('Post-intervention.0','Post-intervention.1','Pre-intervention.0','Pre-intervention.1')
-labels = c('Post-intervention, control', 'Post-intervention, intervention', 'Pre-intervention, control', 'Pre-intervention, intervention')
+labels = c('Post-intervention, control wards', 'Post-intervention, intervention wards', 'Pre-intervention, control wards', 'Pre-intervention, intervention wards')
 for.cmprsk$four.group = factor(for.cmprsk$four.group, levels=levels, labels=labels)
 cuminc = cuminc(ftime=for.cmprsk$LOS_UNIT, fstatus=fstatus, group=for.cmprsk$four.group)
 ptype = 'four groups'
@@ -912,7 +915,7 @@ Lower SPMSQ scores were associated with a longer time to discharge.
 
 There is a possibility that the effect of the intervention varied over the 6 month post-implementation period as the “dose” of intervention may have been increasing as the model matured. To examine this we included an interaction between the intervention and the time since intervention in each ward. The change over time may be non-linear and therefore we examined a range of non-linear shapes using fractional polynomials (Royston et al 1999). The best fitting change over time was estimated using the residual sum of squares (RSS), with a smaller RSS indicating a better model.
 
-The time since the intervention was the difference between each patient’s baseline date and the earliest baseline date in that ward and for the same intervention period (pre or post).
+The time since the intervention was the difference between each patient’s admission date and the earliest admission date in that ward and for the same intervention period (pre or post).
 
 First we check the distribution of the time since implementation. The reason for doing this is to check that we have a reasonable spread of times over which we can evaluate a time-dependent effect. The dip in the data at around 80 days is due to Christmas.
 
@@ -1291,7 +1294,7 @@ The plot below shows the estimated change in length of stay associated with the 
 
 ```{r plot.age.subgroup}
 to.plot = subset(diffs, row %in% c(6,7) & chain==99 & k==5)
-to.plot$subgroup = factor(to.plot$row, levels=6:7, labels=c('Under 75 years', '75+ years'))
+to.plot$subgroup = factor(to.plot$row, levels=7:6, labels=c('75+ years','Under 75 years'))
 ggplot(data=to.plot, aes(y=subgroup, x=mean, xmin=lower, xmax=upper))+
   geom_vline(lty=2, xintercept=0)+
   geom_point(size=3)+
@@ -1301,7 +1304,7 @@ ggplot(data=to.plot, aes(y=subgroup, x=mean, xmin=lower, xmax=upper))+
   g.theme
 ```
 
-#### Table of estimates for length of stay (age subgroup)
+#### Table of survival model estimates for length of stay (age subgroup)
 
 The table below shows the estimated changes in length of stay associated with the intervention in the two age subgroubs.
 
@@ -1318,13 +1321,25 @@ pander(tab, digits=c(0,2,0,3,0))
 
 The Bayesian p-value for the interaction between the intervention and the older age group is `r format.pval(subset(gamma, chain==99)$pvalue, eps=0.001, digits=3)`.
 
+##### Table of "raw" median lengths of stay for subgroups
+
+```{r tables.raw.age}
+# add subgroups 
+for.baseline$group = 1
+for.baseline$group[for.baseline$age >= 75] = 2
+for.baseline$subgroup = factor(for.baseline$group, levels=1:2, labels=c('Under 75 years', '75+ years'))
+
+#
+tab = tabular(Heading('Age group')*subgroup ~ Heading('')*LOS_UNIT *Heading('')*INTERVENTION.factor*median, data=for.baseline)
+pander(tab)
+```
+
+This table shows the median length of stay in each subgroup and intervention.
+
 ### Logistic regression model of any versus none "hospital associated complication of older people" (age subgroup)
 
 ```{r logistic.age.subgroup, include=FALSE}
 interaction.results = NULL
-# add subgroups 
-for.baseline$group = 1
-for.baseline$group[for.baseline$age >= 75] = 2
 
 # formula with interaction
 formula = as.formula('any ~ INTERVENTION + age.c + I(gender=="Male") + CCI_UNADJUSTED_FOR_AGE.c + SPMSQ_SCORE_ADMISSION.c + I(ADL_ADMISSION>0) + elective + interaction + (1|hospital)')
@@ -1375,7 +1390,7 @@ The plot below shows the odds ratios for HACOP associated with the intervention 
 ggplot(data=crude, aes(y=est, x=Mean, xmin=lower, xmax=upper))+
   geom_vline(lty=2, xintercept=1)+
   geom_point(size=3)+
-  scale_y_continuous(breaks=c(1,2), labels=c('Under 75','75+'))+
+  scale_y_continuous(trans = "reverse", breaks=1:2, labels=c('Under 75','75+'))+
   geom_errorbarh(height=0, lwd=1.2)+
   ylab('Age group')+
   xlab('Odds ratio')+
@@ -1427,7 +1442,7 @@ The plot below shows the estimated change in length of stay associated with the 
 
 ```{r plot.frailty.subgroup}
 to.plot = subset(diffs, row%in%c(6,7,8) & chain==99 & k==5)
-to.plot$subgroup = factor(to.plot$row, levels=6:8, labels=c('Under 0.25', '0.25 to 0.40', 'Over 0.40'))
+to.plot$subgroup = factor(to.plot$row, levels=8:6, labels=c('Over 0.40', '0.25 to 0.40', 'Under 0.25'))
 ggplot(data=to.plot, aes(y=subgroup, x=mean, xmin=lower, xmax=upper))+
   geom_vline(lty=2, xintercept=0)+
   geom_point(size=3)+
@@ -1438,7 +1453,7 @@ ggplot(data=to.plot, aes(y=subgroup, x=mean, xmin=lower, xmax=upper))+
   g.theme
 ```
 
-#### Table of estimates for length of stay (frailty subgroup)
+#### Table of survival model estimates for length of stay (frailty subgroup)
 
 ```{r table.frailty.subgroup}
 tab = subset(to.plot, select=c('subgroup','mean','lower','upper','pvalue'))
@@ -1454,14 +1469,26 @@ pander(tab, digits=c(0,2,0,3,0))
 
 The Bayesian p-value for the interaction between the intervention and the frailty group of 0.25 to 0.40 is `r format.pval(subset(gamma, row==1 & chain==99)$pvalue, eps=0.001, digits=3)`, and the p-value for the over 0.40 interaction is `r format.pval(subset(gamma, row==2 & chain==99)$pvalue, eps=0.001, digits=3)`.
 
-### Logistic regression model of any versus non "hospital associated complication of older people" (frailty subgroup)
+##### Table of "raw" median lengths of stay for subgroups
 
-```{r logistic.frailty.subgroup, include=FALSE}
-interaction.results = NULL
+```{r tables.raw.frailty}
 # add subgroups 
 for.baseline$group = 1
 for.baseline$group[for.baseline$Frailty_Index >= 0.25 & for.baseline$Frailty_Index <= 0.40] = 2
 for.baseline$group[for.baseline$Frailty_Index > 0.40] = 3
+for.baseline$subgroup = factor(for.baseline$group, levels=1:3, labels=c('Under 0.25', '0.25 to 0.40','Over 0.40'))
+
+#
+tab = tabular(Heading('Frailty group')*subgroup ~ Heading('')*LOS_UNIT *Heading('')*INTERVENTION.factor*median, data=for.baseline)
+pander(tab)
+```
+
+This table shows the median length of stay in each subgroup and intervention.
+
+### Logistic regression model of any versus non "hospital associated complication of older people" (frailty subgroup)
+
+```{r logistic.frailty.subgroup, include=FALSE}
+interaction.results = NULL
 
 # formula with interactions
 formula = as.formula('any ~ INTERVENTION + age.c + I(gender=="Male") + CCI_UNADJUSTED_FOR_AGE.c + SPMSQ_SCORE_ADMISSION.c + I(ADL_ADMISSION>0) + elective + interaction1  + interaction2 +  (1|hospital)')
@@ -1512,7 +1539,7 @@ The plot below shows the odds ratios for HACOP associated with the intervention 
 ggplot(data=crude, aes(y=est, x=Mean, xmin=lower, xmax=upper))+
   geom_vline(lty=2, xintercept=1)+
   geom_point(size=3)+
-  scale_y_continuous(breaks=c(1,2,3), labels=c('Under 0.25', '0.25 to 0.40','Over 0.40'))+
+  scale_y_continuous(trans = "reverse", breaks=1:3, labels=c('Under 0.25', '0.25 to 0.40', 'Over 0.40'))+
   geom_errorbarh(height=0, lwd=1.2)+
   ylab('Frailty group')+
   xlab('Odds ratio')+
@@ -1526,6 +1553,7 @@ The table below shows the odds ratios for HACOP associated with the intervention
 ```{r table.frailty.subgroup.or}
 tab = subset(crude, select=c('est','Mean','lower','upper'))
 tab$est = factor(tab$est, 1:3, labels=c('Under 0.25', '0.25 to 0.40','Over 0.40'))
+tab$Mean = paste(roundz(tab$Mean,2)) 
 tab$CI = paste(roundz(tab$lower,2), ' to ', roundz(tab$upper,2), sep='') # make CI
 tab = dplyr::select(tab, est, Mean, CI)
 row.names(tab) = NULL
@@ -1553,17 +1581,18 @@ The plot below shows the estimated change in length of stay associated with the 
 
 ```{r plot.hospital.subgroup}
 to.plot = subset(diffs, row%in%c(6,7,8,9) & chain==99 & k==5)
-to.plot$subgroup = factor(to.plot$row, levels=6:9, labels=paste('Hospital ', 1:4, sep=''))
+to.plot$subgroup = to.plot$row - 5
 ggplot(data=to.plot, aes(y=subgroup, x=mean, xmin=lower, xmax=upper))+
   geom_vline(lty=2, xintercept=0)+
   geom_point(size=3)+
+  scale_y_continuous(trans = "reverse", breaks=1:4)+
   geom_errorbarh(height=0, lwd=1.2)+
   ylab('Hospital')+
   xlab('Difference in length of stay')+
   g.theme
 ```
 
-#### Table of estimates for length of stay (hospital subgroup)
+#### Table of survival model estimates for length of stay (hospital subgroup)
 
 ```{r table.hospital.subgroup}
 tab = subset(to.plot, select=c('subgroup','mean','lower','upper','pvalue'))
@@ -1572,18 +1601,30 @@ tab = dplyr::select(tab, subgroup, mean, CI, pvalue)
 row.names(tab) = NULL
 # add numbers per group
 tab$numbers = table(subset(data, source01 == 'Post-intervention')$group)
-names(tab) = c('Subgroup','Mean','CI','P-value','N per group')
+names(tab) = c('Hospital','Mean','CI','P-value','N per group')
 pander(tab, digits=c(0,2,0,3,0))
 ```
 
 The Bayesian p-value for the interaction between the intervention and hospital 2 is `r format.pval(subset(gamma, row==1 & chain==99)$pvalue, eps=0.001, digits=3)`, and the p-value for hospital 3 is `r format.pval(subset(gamma, row==2 & chain==99)$pvalue, eps=0.001, digits=3)`, and the p-value for hospital 4 is `r format.pval(subset(gamma, row==3 & chain==99)$pvalue, eps=0.001, digits=3)`.
 
+##### Table of "raw" median lengths of stay for subgroups
+
+```{r tables.raw.hospital}
+# add subgroups 
+for.baseline$group = as.numeric(as.factor(for.baseline$hospital))
+for.baseline$subgroup = factor(for.baseline$group, levels=1:4, labels=1:4)
+
+#
+tab = tabular(Heading('Hospital')*subgroup ~ Heading('')*LOS_UNIT *Heading('')*INTERVENTION.factor*median, data=for.baseline)
+pander(tab)
+```
+
+This table shows the median length of stay in each hospital and intervention.
+
 ### Logistic regression model of any versus none "hospital associated complication of older people" (hospital subgroup)
 
 ```{r logistic.hospital.subgroup, include=FALSE}
 interaction.results = NULL
-# add subgroups 
-for.baseline$group = as.numeric(as.factor(for.baseline$hospital))
 
 # formula with interactions
 formula = as.formula('any ~ INTERVENTION + age.c + I(gender=="Male") + CCI_UNADJUSTED_FOR_AGE.c + SPMSQ_SCORE_ADMISSION.c + I(ADL_ADMISSION>0) + elective + interaction1 + interaction2 + interaction3 + (1|hospital)')
@@ -1638,7 +1679,7 @@ The plot below shows the odds ratios for HACOP associated with the intervention 
 ggplot(data=crude, aes(y=est, x=Mean, xmin=lower, xmax=upper))+
   geom_vline(lty=2, xintercept=1)+
   geom_point(size=3)+
-  scale_y_continuous(breaks=c(1,2,3,4))+
+  scale_y_continuous(breaks=1:4, trans = "reverse")+
   geom_errorbarh(height=0, lwd=1.2)+
   ylab('Hospital')+
   xlab('Odds ratio')+
@@ -1657,11 +1698,382 @@ tab = dplyr::select(tab, est, Mean, CI)
 row.names(tab) = NULL
 # add numbers per group
 tab$numbers = table(for.baseline$group)
-names(tab) = c('Subgroup','OR','CI','N per group')
+names(tab) = c('Hospital','OR','CI','N per group')
 pander(tab, digits=c(0,2,0,0))
 ```
 
-The p-value for the interaction between the intervention and hospitals were: hospital 2 `r format.pval(crude$pval[2], eps=0.001, digits=3)`, hospital 3 `r format.pval(crude$pval[3], eps=0.001, digits=3)` and hospital 4 `r format.pval(crude$pval[4], eps=0.001, digits=3)`.
+The p-value for the interaction between the intervention and hospitals were: hospital 2 =`r format.pval(crude$pval[2], eps=0.001, digits=3)`, hospital 3 =`r format.pval(crude$pval[3], eps=0.001, digits=3)` and hospital 4 =`r format.pval(crude$pval[4], eps=0.001, digits=3)`.
+
+
+# Post-hoc analyses
+
+These analyses were decided on after seeing the main results. The aim was to examine the potential effects of the intervention in more detail.
+
+### Delirium by subgroup
+
+Here we examine the reduction in delirium in the pre-defined subgroups.
+We use an interaction between the intervention and the levels of the subgroup.
+
+```{r Delirium.age, include=FALSE}
+otype = 'primary'
+# make age subgroup
+data$group = 1
+data$group[data$age >= 75] = 2
+#
+formula = as.formula('DELIRIUM_NEW ~ INTERVENTION + age.c + I(gender=="Male") + CCI_UNADJUSTED_FOR_AGE.c + SPMSQ_SCORE_ADMISSION.c + I(ADL_ADMISSION>0) + elective + INTERVENTION:group + (1|hospital)')
+betas = vars = interaction.results = NULL # means and variances for imputed results
+for (k in 1:5){ # loop through imputations
+  # add imputed data
+  data.to.use = data
+  if(otype %in% c('varying','primary')){
+    data.to.use = dplyr::filter(data, source01 == 'Post-intervention') # just post-intervention data
+  }
+  data.to.use = dplyr::select(data.to.use, -IADL_BASELINE, -SPMSQ_SCORE_ADMISSION) # remove missing variables
+  data.to.use = merge(data.to.use, impute[[k]], by='subject_num')
+  ## set up data
+  data.to.use$age.c = (data.to.use$age -76)/10 # standardised for regression
+  data.to.use$CCI_UNADJUSTED_FOR_AGE.c = (data.to.use$CCI_UNADJUSTED_FOR_AGE -2)/2 # standardised for regression
+  data.to.use$SPMSQ_SCORE_ADMISSION.c = (data.to.use$SPMSQ_SCORE_ADMISSION-8)/(-3) # minus median, divide by IQR
+  # adjusting for hospital clustering
+  model = glmer(formula, data=data.to.use, family=binomial())
+  # parameters
+  betas[[k]] = fixef(model)
+  vars[[k]] = as.matrix(vcov(model))
+# interaction prediction
+  lambda1 = c(0,1,0,0,0,0,0,0,0) # just intervention
+  lambda2 = c(0,1,0,0,0,0,0,0,1) # plus interaction
+  e1 = esticon(model, L=lambda1)
+  e2 = esticon(model, L=lambda2)
+  iframe = rbind(e1, e2)
+  coef.index = length(fixef(model))
+  iframe = dplyr::mutate(iframe, subgroup='Age', est = c(1,2), pvalue=summary(model)$coefficients[coef.index,4], imp=k) %>% # add interaction p-value
+    dplyr::select(imp, subgroup, est, Estimate, Lower, Upper, pvalue) 
+  interaction.results = rbind(interaction.results, iframe)
+}
+# combine imputed results
+mi.res = summary(MIcombine(betas, vars))
+# probably crude combination of interaction results
+crude.age = interaction.results %>% dplyr::group_by(est, subgroup) %>%
+  dplyr::summarise(Mean=exp(mean(Estimate)), lower=exp(mean(Lower)), upper=exp(mean(Upper)), pval=mean(pvalue)) # make into odds ratios
+```
+
+```{r Delirium.frailty, include=FALSE}
+otype = 'primary'
+# make frailty subgroup
+    data$group = 1
+    data$group[data$Frailty_Index >= 0.25 & data$Frailty_Index < 0.40] = 2
+    data$group[data$Frailty_Index >= 0.40] = 3
+    data$group = factor(data$group) 
+#
+formula = as.formula('DELIRIUM_NEW ~ INTERVENTION + age.c + I(gender=="Male") + CCI_UNADJUSTED_FOR_AGE.c + SPMSQ_SCORE_ADMISSION.c + I(ADL_ADMISSION>0) + elective + INTERVENTION:group + (1|hospital)')
+betas = vars = interaction.results = NULL # means and variances for imputed results
+for (k in 1:5){ # loop through imputations
+  # add imputed data
+  data.to.use = data
+  if(otype %in% c('varying','primary')){
+    data.to.use = dplyr::filter(data, source01 == 'Post-intervention') # just post-intervention data
+  }
+  data.to.use = dplyr::select(data.to.use, -IADL_BASELINE, -SPMSQ_SCORE_ADMISSION) # remove missing variables
+  data.to.use = merge(data.to.use, impute[[k]], by='subject_num')
+  ## set up data
+  data.to.use$age.c = (data.to.use$age -76)/10 # standardised for regression
+  data.to.use$CCI_UNADJUSTED_FOR_AGE.c = (data.to.use$CCI_UNADJUSTED_FOR_AGE -2)/2 # standardised for regression
+  data.to.use$SPMSQ_SCORE_ADMISSION.c = (data.to.use$SPMSQ_SCORE_ADMISSION-8)/(-3) # minus median, divide by IQR
+  # adjusting for hospital clustering
+  model = glmer(formula, data=data.to.use, family=binomial())
+  # parameters
+  betas[[k]] = fixef(model)
+  vars[[k]] = as.matrix(vcov(model))
+# interaction prediction
+  lambda1 = c(0,1,0,0,0,0,0,0,0,0) # just intervention
+  lambda2 = c(0,1,0,0,0,0,0,0,1,0) # plus interaction 1
+  lambda3 = c(0,1,0,0,0,0,0,0,0,1) # plus interaction 2
+  e1 = esticon(model, L=lambda1)
+  e2 = esticon(model, L=lambda2)
+  e3 = esticon(model, L=lambda3)
+  iframe = rbind(e1, e2, e3)
+  coef.index = (length(fixef(model))-1):length(fixef(model))
+  iframe = dplyr::mutate(iframe, subgroup='Frailty', est = c(1,2,3), pvalue=c(NA,summary(model)$coefficients[coef.index,4]), imp=k) %>% # add interaction p-value
+    dplyr::select(imp, subgroup, est, Estimate, Lower, Upper, pvalue) 
+  interaction.results = rbind(interaction.results, iframe)
+}
+# combine imputed results
+mi.res = summary(MIcombine(betas, vars))
+# probably crude combination of interaction results
+crude.frailty = interaction.results %>% dplyr::group_by(est, subgroup) %>%
+  dplyr::summarise(Mean=exp(mean(Estimate)), lower=exp(mean(Lower)), upper=exp(mean(Upper)), pval=mean(pvalue)) # make into odds ratios
+```
+
+```{r Delirium.hospital, include=FALSE}
+otype = 'primary'
+# make hospital subgroup
+ data$group = as.factor(as.numeric(as.factor(data$hospital)))
+#
+formula = as.formula('DELIRIUM_NEW ~ INTERVENTION + age.c + I(gender=="Male") + CCI_UNADJUSTED_FOR_AGE.c + SPMSQ_SCORE_ADMISSION.c + I(ADL_ADMISSION>0) + elective + INTERVENTION:group + (1|hospital)')
+betas = vars = interaction.results = NULL # means and variances for imputed results
+for (k in 1:5){ # loop through imputations
+  # add imputed data
+  data.to.use = data
+  if(otype %in% c('varying','primary')){
+    data.to.use = dplyr::filter(data, source01 == 'Post-intervention') # just post-intervention data
+  }
+  data.to.use = dplyr::select(data.to.use, -IADL_BASELINE, -SPMSQ_SCORE_ADMISSION) # remove missing variables
+  data.to.use = merge(data.to.use, impute[[k]], by='subject_num')
+  ## set up data
+  data.to.use$age.c = (data.to.use$age -76)/10 # standardised for regression
+  data.to.use$CCI_UNADJUSTED_FOR_AGE.c = (data.to.use$CCI_UNADJUSTED_FOR_AGE -2)/2 # standardised for regression
+  data.to.use$SPMSQ_SCORE_ADMISSION.c = (data.to.use$SPMSQ_SCORE_ADMISSION-8)/(-3) # minus median, divide by IQR
+  # adjusting for hospital clustering
+  model = glmer(formula, data=data.to.use, family=binomial())
+  # parameters
+  betas[[k]] = fixef(model)
+  vars[[k]] = as.matrix(vcov(model))
+# interaction prediction
+  lambda1 = c(0,1,0,0,0,0,0,0,0,0,0) # hospital 1
+  lambda2 = c(0,1,0,0,0,0,0,0,1,0,0) # hospital 2
+  lambda3 = c(0,1,0,0,0,0,0,0,0,1,0) # hospital 3
+  lambda4 = c(0,1,0,0,0,0,0,0,0,0,1) # hospital 4
+  e1 = esticon(model, L=lambda1)
+  e2 = esticon(model, L=lambda2)
+  e3 = esticon(model, L=lambda3)
+  e4 = esticon(model, L=lambda4)
+  iframe = rbind(e1, e2, e3, e4)
+  coef.index = (length(fixef(model))-2):length(fixef(model))
+  iframe = dplyr::mutate(iframe, subgroup='Hospital', est = c(1,2,3,4), pvalue=c(NA,summary(model)$coefficients[coef.index,4]), imp=k) %>% # add interaction p-value
+    dplyr::select(imp, subgroup, est, Estimate, Lower, Upper, pvalue) 
+  interaction.results = rbind(interaction.results, iframe)
+}
+# combine imputed results
+mi.res = summary(MIcombine(betas, vars))
+# probably crude combination of interaction results
+crude.hospital = interaction.results %>% dplyr::group_by(est, subgroup) %>%
+  dplyr::summarise(Mean=exp(mean(Estimate)), lower=exp(mean(Lower)), upper=exp(mean(Upper)), pval=mean(pvalue)) # make into odds ratios
+```
+
+##### Table of odds ratios for delirium and confidence intervals
+
+```{r Delirium.table}
+to.plot  = rbind(crude.age, crude.frailty, crude.hospital)
+to.table = to.plot
+to.table$pval[1] = NA # blank double p-value
+to.table = dplyr::mutate(to.table, Mean = roundz(Mean,2),
+                         pval = format.pval(pval, eps=0.001, digits=3),
+                         CI = paste(roundz(lower,2), ' to ', roundz(upper,2), sep='')) %>% # make CI
+  dplyr::select(subgroup, est, Mean, CI, pval) %>%
+  dplyr::rename('Subgroup'='subgroup', 'Level'='est', '95% CI' = 'CI')
+pander(to.table, style='simple')
+```
+
+Subgroup levels are:
+
+* Age: 1 = 74 and under, 2 = 75 and over
+
+* Frailty: 1 = Under 0.25, 2 = 0.25 to 0.39, 3 = 0.40 and above,
+
+The p-values are for the interaction between the overall intervention effect and that subgroup. The first p-value per subgroup is missing because that level is modelled using the overall effect, hence there is no interaction.
+
+##### Plot of odds ratios for delirium and confidence intervals
+
+```{r Delirium.plot, fig.width=9}
+ggplot(data=to.plot, aes(y=est, x=Mean, xmin=lower, xmax=upper))+
+  geom_vline(lty=2, xintercept=1)+
+  geom_point(size=3)+
+  geom_errorbarh(height=0, lwd=1.2)+
+  ylab('')+
+  scale_y_continuous(breaks=1:4, trans = "reverse")+
+  xlab('Odds ratio')+
+  facet_wrap(~subgroup, scales='free')+
+  g.theme
+```
+
+Subgroup levels are:
+
+* Age: 1 = 74 and under, 2 = 75 and over
+
+* Frailty: 1 = Under 0.25, 2 = 0.25 to 0.39, 3 = 0.40 and above,
+
+### Discharge home by subgroup
+
+Here we examine the increase in discharge home probability in the pre-defined subgroups.
+We use an interaction between the intervention and the levels of the subgroup.
+
+```{r Home.age, include=FALSE}
+otype = 'primary'
+# make age subgroup
+data$group = 1
+data$group[data$age >= 75] = 2
+#
+formula = as.formula('dc_binary ~ INTERVENTION + age.c + I(gender=="Male") + CCI_UNADJUSTED_FOR_AGE.c + SPMSQ_SCORE_ADMISSION.c + I(ADL_ADMISSION>0) + elective + INTERVENTION:group + (1|hospital)')
+betas = vars = interaction.results = NULL # means and variances for imputed results
+for (k in 1:5){ # loop through imputations
+  # add imputed data
+  data.to.use = data
+  if(otype %in% c('varying','primary')){
+    data.to.use = dplyr::filter(data, source01 == 'Post-intervention') # just post-intervention data
+  }
+  data.to.use = dplyr::select(data.to.use, -IADL_BASELINE, -SPMSQ_SCORE_ADMISSION) # remove missing variables
+  data.to.use = merge(data.to.use, impute[[k]], by='subject_num')
+  ## set up data
+  data.to.use$dc_binary = as.numeric(data.to.use$dc_dest %in% optimal.groups)
+  data.to.use = dplyr::filter(data.to.use, dc_dest != 'Deceased') # remove deaths
+  data.to.use$age.c = (data.to.use$age -76)/10 # standardised for regression
+  data.to.use$CCI_UNADJUSTED_FOR_AGE.c = (data.to.use$CCI_UNADJUSTED_FOR_AGE -2)/2 # standardised for regression
+  data.to.use$SPMSQ_SCORE_ADMISSION.c = (data.to.use$SPMSQ_SCORE_ADMISSION-8)/(-3) # minus median, divide by IQR
+  # adjusting for hospital clustering
+  model = glmer(formula, data=data.to.use, family=binomial())
+  # parameters
+  betas[[k]] = fixef(model)
+  vars[[k]] = as.matrix(vcov(model))
+# interaction prediction
+  lambda1 = c(0,1,0,0,0,0,0,0,0) # just intervention
+  lambda2 = c(0,1,0,0,0,0,0,0,1) # plus interaction
+  e1 = esticon(model, L=lambda1)
+  e2 = esticon(model, L=lambda2)
+  iframe = rbind(e1, e2)
+  coef.index = length(fixef(model))
+  iframe = dplyr::mutate(iframe, subgroup='Age', est = c(1,2), pvalue=summary(model)$coefficients[coef.index,4], imp=k) %>% # add interaction p-value
+    dplyr::select(imp, subgroup, est, Estimate, Lower, Upper, pvalue) 
+  interaction.results = rbind(interaction.results, iframe)
+}
+# combine imputed results
+mi.res = summary(MIcombine(betas, vars))
+# probably crude combination of interaction results
+crude.age = interaction.results %>% dplyr::group_by(est, subgroup) %>%
+  dplyr::summarise(Mean=exp(mean(Estimate)), lower=exp(mean(Lower)), upper=exp(mean(Upper)), pval=mean(pvalue)) # make into odds ratios
+```
+
+```{r Home.frailty, include=FALSE}
+otype = 'primary'
+# make frailty subgroup
+    data$group = 1
+    data$group[data$Frailty_Index >= 0.25 & data$Frailty_Index < 0.40] = 2
+    data$group[data$Frailty_Index >= 0.40] = 3
+    data$group = factor(data$group) 
+#
+formula = as.formula('dc_binary ~ INTERVENTION + age.c + I(gender=="Male") + CCI_UNADJUSTED_FOR_AGE.c + SPMSQ_SCORE_ADMISSION.c + I(ADL_ADMISSION>0) + elective + INTERVENTION:group + (1|hospital)')
+betas = vars = interaction.results = NULL # means and variances for imputed results
+for (k in 1:5){ # loop through imputations
+  # add imputed data
+  data.to.use = data
+  if(otype %in% c('varying','primary')){
+    data.to.use = dplyr::filter(data, source01 == 'Post-intervention') # just post-intervention data
+  }
+  data.to.use = dplyr::select(data.to.use, -IADL_BASELINE, -SPMSQ_SCORE_ADMISSION) # remove missing variables
+  data.to.use = merge(data.to.use, impute[[k]], by='subject_num')
+  ## set up data
+  data.to.use$dc_binary = as.numeric(data.to.use$dc_dest %in% optimal.groups)
+  data.to.use = dplyr::filter(data.to.use, dc_dest != 'Deceased') # remove deaths
+  data.to.use$age.c = (data.to.use$age -76)/10 # standardised for regression
+  data.to.use$CCI_UNADJUSTED_FOR_AGE.c = (data.to.use$CCI_UNADJUSTED_FOR_AGE -2)/2 # standardised for regression
+  data.to.use$SPMSQ_SCORE_ADMISSION.c = (data.to.use$SPMSQ_SCORE_ADMISSION-8)/(-3) # minus median, divide by IQR
+  # adjusting for hospital clustering
+  model = glmer(formula, data=data.to.use, family=binomial())
+  # parameters
+  betas[[k]] = fixef(model)
+  vars[[k]] = as.matrix(vcov(model))
+# interaction prediction
+  lambda1 = c(0,1,0,0,0,0,0,0,0,0) # just intervention
+  lambda2 = c(0,1,0,0,0,0,0,0,1,0) # plus interaction 1
+  lambda3 = c(0,1,0,0,0,0,0,0,0,1) # plus interaction 2
+  e1 = esticon(model, L=lambda1)
+  e2 = esticon(model, L=lambda2)
+  e3 = esticon(model, L=lambda3)
+  iframe = rbind(e1, e2, e3)
+  coef.index = (length(fixef(model))-1):length(fixef(model))
+  iframe = dplyr::mutate(iframe, subgroup='Frailty', est = c(1,2,3), pvalue=c(NA,summary(model)$coefficients[coef.index,4]), imp=k) %>% # add interaction p-value
+    dplyr::select(imp, subgroup, est, Estimate, Lower, Upper, pvalue) 
+  interaction.results = rbind(interaction.results, iframe)
+}
+# combine imputed results
+mi.res = summary(MIcombine(betas, vars))
+# probably crude combination of interaction results
+crude.frailty = interaction.results %>% dplyr::group_by(est, subgroup) %>%
+  dplyr::summarise(Mean=exp(mean(Estimate)), lower=exp(mean(Lower)), upper=exp(mean(Upper)), pval=mean(pvalue)) # make into odds ratios
+```
+
+```{r Home.hospital, include=FALSE}
+otype = 'primary'
+# make hospital subgroup
+ data$group = as.factor(as.numeric(as.factor(data$hospital)))
+#
+formula = as.formula('dc_binary ~ INTERVENTION + age.c + I(gender=="Male") + CCI_UNADJUSTED_FOR_AGE.c + SPMSQ_SCORE_ADMISSION.c + I(ADL_ADMISSION>0) + elective + INTERVENTION:group + (1|hospital)')
+betas = vars = interaction.results = NULL # means and variances for imputed results
+for (k in 1:5){ # loop through imputations
+  # add imputed data
+  data.to.use = data
+  if(otype %in% c('varying','primary')){
+    data.to.use = dplyr::filter(data, source01 == 'Post-intervention') # just post-intervention data
+  }
+  data.to.use = dplyr::select(data.to.use, -IADL_BASELINE, -SPMSQ_SCORE_ADMISSION) # remove missing variables
+  data.to.use = merge(data.to.use, impute[[k]], by='subject_num')
+  ## set up data
+  data.to.use$dc_binary = as.numeric(data.to.use$dc_dest %in% optimal.groups)
+  data.to.use = dplyr::filter(data.to.use, dc_dest != 'Deceased') # remove deaths
+  data.to.use$age.c = (data.to.use$age -76)/10 # standardised for regression
+  data.to.use$CCI_UNADJUSTED_FOR_AGE.c = (data.to.use$CCI_UNADJUSTED_FOR_AGE -2)/2 # standardised for regression
+  data.to.use$SPMSQ_SCORE_ADMISSION.c = (data.to.use$SPMSQ_SCORE_ADMISSION-8)/(-3) # minus median, divide by IQR
+  # adjusting for hospital clustering
+  model = glmer(formula, data=data.to.use, family=binomial())
+  # parameters
+  betas[[k]] = fixef(model)
+  vars[[k]] = as.matrix(vcov(model))
+# interaction prediction
+  lambda1 = c(0,1,0,0,0,0,0,0,0,0,0) # hospital 1
+  lambda2 = c(0,1,0,0,0,0,0,0,1,0,0) # hospital 2
+  lambda3 = c(0,1,0,0,0,0,0,0,0,1,0) # hospital 3
+  lambda4 = c(0,1,0,0,0,0,0,0,0,0,1) # hospital 4
+  e1 = esticon(model, L=lambda1)
+  e2 = esticon(model, L=lambda2)
+  e3 = esticon(model, L=lambda3)
+  e4 = esticon(model, L=lambda4)
+  iframe = rbind(e1, e2, e3, e4)
+  coef.index = (length(fixef(model))-2):length(fixef(model))
+  iframe = dplyr::mutate(iframe, subgroup='Hospital', est = c(1,2,3,4), pvalue=c(NA,summary(model)$coefficients[coef.index,4]), imp=k) %>% # add interaction p-value
+    dplyr::select(imp, subgroup, est, Estimate, Lower, Upper, pvalue) 
+  interaction.results = rbind(interaction.results, iframe)
+}
+# combine imputed results
+mi.res = summary(MIcombine(betas, vars))
+# probably crude combination of interaction results
+crude.hospital = interaction.results %>% dplyr::group_by(est, subgroup) %>%
+  dplyr::summarise(Mean=exp(mean(Estimate)), lower=exp(mean(Lower)), upper=exp(mean(Upper)), pval=mean(pvalue)) # make into odds ratios
+```
+
+##### Table of odds ratios for discharge home and confidence intervals
+
+```{r home.table}
+to.plot  = rbind(crude.age, crude.frailty, crude.hospital)
+to.table = to.plot
+to.table$pval[1] = NA # blank double p-value
+to.table = dplyr::mutate(to.table, Mean = roundz(Mean,2),
+                         pval = format.pval(pval, eps=0.001, digits=3),
+                         CI = paste(roundz(lower,2), ' to ', roundz(upper,2), sep='')) %>% # make CI
+  dplyr::select(subgroup, est, Mean, CI, pval) %>%
+  dplyr::rename('Subgroup'='subgroup', 'Level'='est', '95% CI' = 'CI')
+pander(to.table, style='simple')
+```
+
+Subgroup levels are:
+
+* Age: 1 = 74 and under, 2 = 75 and over
+
+* Frailty: 1 = Under 0.25, 2 = 0.25 to 0.39, 3 = 0.40 and above,
+
+The p-values are for the interaction between the overall intervention effect and that subgroup. The first p-value per subgroup is missing because that level is modelled using the overall effect, hence there is no interaction.
+
+##### Plot of odds ratios for discharge home and confidence intervals
+
+```{r home.plot, fig.width=9}
+ggplot(data=to.plot, aes(y=est, x=Mean, xmin=lower, xmax=upper))+
+  geom_vline(lty=2, xintercept=1)+
+  geom_point(size=3)+
+  geom_errorbarh(height=0, lwd=1.2)+
+  ylab('')+
+  scale_y_continuous(breaks=1:4, trans = "reverse")+
+  xlab('Odds ratio')+
+  facet_wrap(~subgroup, scales='free')+
+  g.theme
+```
 
 # Appendix
 
@@ -1718,7 +2130,7 @@ print(cont.tab.primary.stay)
 Dates are presented as Year-Month-Day.
 
 ```{r baseline.dates}
-cont.tab = tabular(Heading('Ward')*ward*(Heading('Baseline')*d_baseline + Heading('Hospital discharge date')*d_hosp_dc) ~ (N+Mean +Min+ Max), data=for.baseline)
+cont.tab = tabular(Heading('Ward')*ward*(Heading('Admission')*d_adm_bl + Heading('Hospital discharge date')*d_hosp_dc) ~ (N+Mean +Min+ Max), data=for.baseline)
 pander(cont.tab)
 ```
 

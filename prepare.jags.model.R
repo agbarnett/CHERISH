@@ -77,7 +77,7 @@ for (k in 1:5){ #
     # and for predictions over time:
     N.pred = 30
     times = seq(0.01, max(data.to.use$time.since), length.out=N.pred)
-    fp.times = fp(times, power=time.interaction)
+    fp.times = fp(times, power=time.interaction) # also transform these times
   }
   # what data to use (in terms of pre- and post-intervention), depends on primary or secondary outcome
   mtype = otype
