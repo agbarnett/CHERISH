@@ -1,0 +1,98 @@
+---
+title: "Tables for paper"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning=FALSE, message=FALSE, error=FALSE, comment='', dpi=400)
+options(width=1000) # Wide pages
+library(tidyr)
+library(dplyr)
+library(flextable)
+## main data:
+load('data/Analysis.Ready.RData') # from MakeDataNov2018.R
+# five primary outcome variables, used a lot below
+hacop.vars = c(
+'delirium_new',
+'hospital_associated_functional_decline',
+'hospital_associated_incontinence',
+'falls_total',
+'pressurie_injury_new')
+# make any versus none HACOP variable ; ignore missing if any yes
+data$any = rowSums(as.matrix(dplyr::select(data, hacop.vars)), na.rm = TRUE) > 0 # first sum five outcomes ignoring missing, and set to yes if any positive ...
+# ... next find any missing with zero sum
+index1 = rowSums(as.matrix(dplyr::select(data, hacop.vars)), na.rm = TRUE) == 0  # zero score ...
+index2 = is.na(rowSums(as.matrix(dplyr::select(data, hacop.vars)), na.rm = FALSE)) # ... but some missing
+index = as.numeric(index1) * as.numeric(index2) # both true
+data$any[index==1] = NA
+# make age subgroup
+data$group = 1
+data$group[data$age >= 75] = 2
+# make frailty subgroup
+    data$fgroup = 1
+    data$fgroup[data$Frailty_Index >= 0.25 & data$Frailty_Index < 0.40] = 2
+    data$fgroup[data$Frailty_Index >= 0.40] = 3
+    data$fgroup = factor(data$fgroup) 
+
+    # data for baseline analysis
+for.baseline = filter(data, source01 == 'Post-intervention') # just 
+```
+
+
+Tables needed for paper.
+
+### Age
+
+```{r}
+# checked with overall numbers
+tab = filter(for.baseline, !is.na(any)) %>%
+  group_by(group, intervention, any) %>%
+  tally() %>%
+  group_by(group, intervention) %>%
+  mutate(p = prop.table(n)*100,
+         cell = paste(n, ' (', round(p), ')', sep='')) %>%
+  filter(any==TRUE) %>%
+  select(-n, -p, -any) %>%
+  pivot_wider(names_from=intervention, values_from=cell)
+  
+ftab = flextable(tab) %>%
+  autofit()
+ftab
+```
+### Frailty
+
+```{r}
+# checked with overall numbers
+tab = filter(for.baseline, !is.na(any)) %>%
+  group_by(fgroup, intervention, any) %>%
+  tally() %>%
+  group_by(fgroup, intervention) %>%
+  mutate(p = prop.table(n)*100,
+         cell = paste(n, ' (', round(p), ')', sep='')) %>%
+  filter(any==TRUE) %>%
+  select(-n, -p, -any) %>%
+  pivot_wider(names_from=intervention, values_from=cell)
+  
+ftab = flextable(tab) %>%
+  autofit()
+ftab
+```
+
+### Hospital
+
+```{r}
+# checked with overall numbers
+tab = filter(for.baseline, !is.na(any)) %>%
+  group_by(hospital, intervention, any) %>%
+  tally() %>%
+  group_by(hospital, intervention) %>%
+  mutate(p = prop.table(n)*100,
+         cell = paste(n, ' (', round(p), ')', sep='')) %>%
+  filter(any==TRUE) %>%
+  select(-n, -p, -any) %>%
+  pivot_wider(names_from=intervention, values_from=cell)
+  
+ftab = flextable(tab) %>%
+  autofit()
+ftab
+```

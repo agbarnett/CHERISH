@@ -1,0 +1,778 @@
+---
+title: "CHERISH: Collaborative for Hospitalised Elders Reducing the Impact of Stays in Hospital (analysis update February 2021)"
+author: "Adrian Barnett"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning=FALSE, message=FALSE, error=FALSE, comment='', dpi=400)
+options(width=1000) # Wide pages
+this.dir = getwd()
+source('99_functions.R')
+library(INLA) # for Bayesian models
+library(brinla)
+library(diagram)
+#library(car) # for VIF
+library(tidyr)
+library(dplyr)
+library(stringr)
+library(doBy) # for esticon
+library(survival)
+library(survminer) # for plots
+library(tables)
+library(broom)
+library(lme4) # for logistic regression with random intercepts for hospitals
+#library(geepack) # for logistic GEE
+library(flextable)
+library(ggplot2)
+g.theme = theme_bw() + theme(panel.grid.minor = element_blank())
+library(cmprsk)
+library(mitools) # for combining estimates from imputed data
+cbPalette = c("#999999", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+## main data:
+load('data/Analysis.Ready.RData') # from MakeDataFeb2021.R
+# five primary outcome variables
+hacop.vars = c(
+'delirium_new',
+'hospital_associated_incontinence',
+'hospital_associated_functional_decline',
+'falls_total',
+'pressurie_injury_new')
+hacop.nice = c('Delirium','Incontinence','Functional decline','Falls','Pressure injury') # nice labels for five outcomes
+short.letters = c('DE','IN','FD','FA','PI') # short labels for five HACOP variables
+```
+
+```{r updated.functional.decline, include=FALSE}
+## Update to functional decline to remove missing (Sep 2018)
+# "if the discharge destination from the index care team is subacute care within facility, subacute care other, new admission RACF OR death then functional decline =yes"
+index = is.na(data$hospital_associated_functional_decline) & (data$dc_dest %in% c('Sub-acute care within facility','Sub-acute care other hospital','New admission RACF','Deceased'))
+data$hospital_associated_functional_decline[index] = 1
+# "if the discharge destination from the index care team is another acute ward and then discharge from hospital is new RACF or death then we can probably assume that their function did not meaningfully recover"
+index = is.na(data$hospital_associated_functional_decline) & data$dc_dest=='Other acute ward' & (data$dc_dest_hosp %in% c('New admission RACF','Deceased'))
+data$hospital_associated_functional_decline[index] = 1
+
+# data for baseline analysis
+for.baseline = dplyr::filter(data, source01 == 'Post-intervention') # just post-intervention data
+
+# names(data)[grep('adm', tolower(names(data)))]
+```
+
+All results use the post-intervention data only.
+
+```{r impute, include=FALSE}
+# get imputed data
+infile = paste('MICE.Results.impute.RData', sep='')
+load(infile)
+N.impute = 5
+```
+
+# Logistic regression model of "hospital associated complication of older people" with a varying intervention effect across the five syndromes (secondary outcome)
+
+Here we allow the intervention effect to vary by using five separate logistic regression models for each of the five syndromes.
+We adjust for within-hospital correlation using random intercepts.
+This is an updated analysis of two of the five syndromes that exclude those who did not have the syndrome at admission.
+
+##### Table of syndrome numbers
+
+The table below shows the numbers for two of the five syndromes by intervention group.
+
+```{r syndrome.numbers}
+# make factors for table
+
+# Feb 2021 addition
+# "a.	Hospital-associated delirium should only include those who did NOT have delirium at admission"
+# "b.	Hospital-associated incontinence should only include those who were continent in either urine or faces 2 weeks prior to admission (if they had dual incontinence then they cannot become newly incontinent). In SPSS I did this by selecting those with 
+
+for.baseline = mutate(for.baseline, 
+                      # changes:
+    delirium_new = ifelse(delirium_admission==1, NA, delirium_new),
+    hospital_associated_incontinence = ifelse(w2_prior_incont_urine=="No" | w2_prior_incont_faeces=="No", hospital_associated_incontinence, NA),
+    #
+    delirium = factor(delirium_new, levels=0:1, labels=c("No",'Yes'), ordered = TRUE),
+    decline = factor(hospital_associated_functional_decline, levels=0:1, labels=c("No",'Yes'), ordered = TRUE),
+    incon = factor(hospital_associated_incontinence, levels=0:1, labels=c("No",'Yes'), ordered = TRUE),
+     falls = factor(falls_total, levels=0:1, labels=c("No",'Yes'), ordered = TRUE),
+     pressure = factor(pressurie_injury_new, levels=0:1, labels=c("No",'Yes'), ordered = TRUE)
+)
+# table
+ftab = select(for.baseline, subject_num, intervention_factor, delirium, incon) %>%
+  pivot_longer(!c(subject_num, intervention_factor)) %>%
+  group_by(intervention_factor, name, value) %>%
+  tally() %>%
+  filter(!is.na(value)) %>%
+  group_by(intervention_factor, name) %>%
+  mutate(percent = 100*prop.table(n),
+         cell = paste(n, ' (', round(percent), ')', sep='' )) %>%
+  ungroup() %>%
+  select(intervention_factor, name, value, cell) %>%
+  mutate(name = ifelse(name=='incon', 'Incontinence', name)) %>%
+  pivot_wider(names_from='intervention_factor', values_from='cell')
+ftab = flextable(ftab) %>%
+  theme_box() %>%
+  autofit()
+ftab
+```
+
+##### Logistic regression estimates
+
+```{r logistic.individual, include=FALSE}
+otype = 'primary'
+model.res = NULL
+for (j in 1:2){ # loop through first two outcomes (only ones changed)
+  formula = as.formula(paste(hacop.vars[j], ' ~ intervention + age.c + I(gender=="Male") + cci_unadjusted_for_age.c + spmsq_score_admission.c + I(adl_admission>0) + elective + (1|hospital)', sep=''))
+  betas = vars = NULL # means and variances for imputed results
+  for (k in 1:5){ # loop through imputations
+  # add imputed data
+  data.to.use = data
+  if(otype %in% c('varying','primary')){
+    data.to.use = for.baseline # post-intervention data only
+  }
+  data.to.use = dplyr::select(data.to.use, -iadl_baseline, -spmsq_score_admission) # remove missing variables
+  data.to.use = merge(data.to.use, impute[[k]], by='subject_num')
+  ## set up data
+  data.to.use$age.c = (data.to.use$age -76)/10 # standardised for regression
+  data.to.use$cci_unadjusted_for_age.c = (data.to.use$cci_unadjusted_for_age -2)/2 # standardised for regression
+  data.to.use$spmsq_score_admission.c = (data.to.use$spmsq_score_admission-8)/(-3) # minus median, divide by IQR
+  # adjusting for hospital clustering
+    model = glmer(formula, data=data.to.use, family=binomial())
+    betas[[k]] = fixef(model)
+    vars[[k]] = as.matrix(vcov(model))
+  } # end of imputation loop
+# combine imputed results
+ mi.res = summary(MIcombine(betas, vars))
+ frame = mi.res[2,] # second row with intervention results
+ frame$outcome = hacop.nice[j]
+ model.res = rbind(model.res, frame)
+}
+```
+
+The table below shows the mean odds ratio and 95% confidence interval for the intervention effect (compared with the control).
+All five models adjust for age, gender, ADL (admission), Charlson, SPMSQ, elective and hospital (using a random intercept), but the estimates for these variables are not shown in order to focus on the intervention effect.
+
+```{r table.logistic}
+parms = subset(model.res, select=c('outcome','results','(lower','upper)'))
+names(parms) = c('Outcome','Mean','Lower','Upper')
+parms = mutate(parms,
+       Mean = exp(Mean),
+       Lower = exp(Lower),
+       Upper = exp(Upper), 
+      CI = paste(roundz(Lower,2), ' to ', roundz(Upper,2), sep='')) %>% # make confidence interval
+   select(Outcome, Mean, CI)
+rownames(parms) = NULL
+# output table
+ftab = flextable(parms) %>%
+  theme_box() %>%
+  colformat_num(j=2, digits=2) %>%
+  autofit()
+ftab
+```
+
+# Survival analysis
+
+We use survival analysis to examine re-admission and death up to six months from the patients' discharge from the unit.
+Patients who died in hospital were excluded.
+
+Death is a competing risk for readmission, because once a patient has died they can no longer be readmitted. We need to adjust for this in the survival analysis and so we use a competing risks approach. We do this using by comparing the intervention and control groups using:
+
+* Cumulative probability curves instead of Kaplan-Meier curves to show the probability of death and readmission over the six months  
+
+* Cumulative risk models to estimate the **cumulative** risk of death or readmission whilst adjusting for a range of potential predictors. 
+
+* Cox survival models to estimate the **instantaneous** risk of death or readmission whilst adjusting for a range of potential predictors. 
+
+The diagram below shows the three possible transitions over time. Patients may go straight to death, or may first go to readmission and then death. Our survival models accounts for these possible transitions and the times.
+
+```{r}
+states = c('Discharge','Readmission','Death')
+# Matrix of joins between states:
+M <- matrix(nrow = 3, ncol = 3, byrow = TRUE, data = 0)
+M[2,1] = "' '"
+M[3,2] = "' '"
+M[3,1] = "' '"
+par(mai=rep(0,4))
+plotmat(M, pos=c(1,2), name=states, curve=0, box.type='rect', arr.pos=0.5, box.size=0.13)
+```
+
+Death is a competing risk for readmission, but readmission is not a competing risk for death. Instead it is likely on the causal pathway from the intervention to death, hence we do not adjust for readmission in the survival analysis of time to death.
+
+## Cumulative risk plots
+
+
+### Death at six months
+
+```{r}
+## data for readmission does not have readmission date
+for_crr_death = competing_risks_times(indata = for.baseline, dates = c('d_dc_index_team','death_date'))
+#
+cplot = ggplot(data=for_crr_death$for_plot, aes(x=time, y=est, linetype=intervention))+
+  geom_step(size=1.05)+
+  xlab('Days from discharge')+
+  ylab('Cumulative probability')+
+#  scale_x_continuous(breaks=c(0, 20, 40, 60, 80))+
+  scale_linetype_manual(NULL, values=c(1,3))+
+  theme_bw()+
+  theme(panel.grid.minor = element_blank())+
+  theme(legend.position = 'right')
+cplot
+jpeg('figures/cumulative_risks_death.jpg', res=500, width=5.5, height=4.5, units='in')
+print(cplot)
+invisible(dev.off())
+```
+
+
+### All-cause readmission and death at six months
+
+```{r, fig.width=7}
+## data for readmission includes readmission date
+for_crr_readmit = competing_risks_times(indata = for.baseline, dates = c('d_dc_index_team','death_date','d_adm1_m6'))
+#
+cplot = ggplot(data=for_crr_readmit$for_plot, aes(x=time, y=est, linetype=intervention, col=factor(event_num)))+
+  geom_step(size=1.05)+
+  xlab('Days from discharge/readmission')+
+  ylab('Cumulative probability')+
+#  scale_x_continuous(breaks=c(0, 20, 40, 60, 80))+
+  scale_linetype_manual(NULL, values=c(1,3))+
+  scale_colour_manual(name=NULL, values=c('indianred3','dodgerblue'), labels=c("Death",'Readmission')) +  
+  facet_wrap(~facet_factor)+
+  theme_bw()+
+  theme(panel.grid.minor = element_blank())+
+  theme(legend.position = 'right')
+cplot
+jpeg('figures/cumulative_risks_death_readmission_allcause.jpg', res=500, width=5.5, height=4.5, units='in')
+print(cplot)
+invisible(dev.off())
+```
+
+The risks of death and readmission after the initial discharge are somewhat higher in the control group. The readmission curves diverge after 50 days.
+
+The risk of death after readmission are similar for the two groups. In both groups the risk of death after the readmission is much higher than the risk of death from the initial discharge.
+
+### Unplanned readmission and death at six months
+
+```{r, fig.width=7}
+for_crr_unplan = competing_risks_times(indata = for.baseline, dates = c('d_dc_index_team','death_date','d_unpl_adm1_m6')) # unplanned admission date
+#
+cplot = ggplot(data=for_crr_unplan$for_plot, aes(x=time, y=est, linetype=intervention, col=factor(event_num)))+
+  geom_step(size=1.05)+
+  xlab('Days from discharge/readmission')+
+  ylab('Cumulative probability')+
+#  scale_x_continuous(breaks=c(0, 20, 40, 60, 80))+
+  scale_linetype_manual(NULL, values=c(1,3))+
+  scale_colour_manual(name=NULL, values=c('indianred3','dodgerblue'), labels=c("Death",'Readmission')) +  
+  facet_wrap(~facet_factor)+
+  theme_bw()+
+  theme(panel.grid.minor = element_blank())+
+  theme(legend.position = 'right')
+cplot
+jpeg('figures/cumulative_risks_death_readmission_unplanned.jpg', res=500, width=5.5, height=4.5, units='in')
+print(cplot)
+invisible(dev.off())
+```
+
+
+### Cox survival models of instantaneous risk (death)
+
+```{r}
+any_results = length(dir('results', pattern='six_month_death')>0)
+if(any_results == FALSE){
+  data_for_surv = for_crr_death$data
+  outcome = 'death_date'
+  source('cox_models_six_months.R')
+  save(model.imp, model, residuals, ests, file='results/six_month_death.RData')
+}
+if(any_results == TRUE){
+  load('results/six_month_death.RData')
+}
+# tabulate the estimates
+digits = 2
+to_table = 
+  filter(ests, !str_detect(vars, pattern='Intercept')) %>%
+  mutate(HR = roundz(exp(mean),digits),
+              lower = roundz(exp(lower),digits),
+              upper = roundz(exp(upper),digits),
+              CI = paste(lower, ' to ', upper, sep='')) %>%
+  select(vars, HR, CI)
+ftab = flextable(to_table) %>%
+  theme_box() %>%
+  autofit()
+ftab
+```
+
+### Cox survival models of instantaneous risk (all-cause readmission)
+
+```{r}
+any_results = length(dir('results', pattern='six_month_allcause')>0)
+if(any_results == FALSE){
+  data_for_surv = filter(for_crr_readmit$data, from =='d_dc_index_team') # do not use transitions from second admission (event has already happened)
+  outcome = 'd_adm1_m6' # all-cause readmission
+  source('cox_models_six_months.R')
+  save(model.imp, model, residuals, ests, file='results/six_month_allcause.RData')
+}
+if(any_results == TRUE){
+  load('results/six_month_allcause.RData')
+}
+# tabulate the estimates
+digits = 2
+to_table = 
+  filter(ests, !str_detect(vars, pattern='Intercept')) %>%
+  mutate(HR = roundz(exp(mean),digits),
+              lower = roundz(exp(lower),digits),
+              upper = roundz(exp(upper),digits),
+              CI = paste(lower, ' to ', upper, sep='')) %>%
+  select(vars, HR, CI)
+ftab = flextable(to_table) %>%
+  theme_box() %>%
+  autofit()
+ftab
+```
+
+### Cox survival models of instantaneous risk (unplanned readmission)
+
+The table shows the hazard ratios and 95% credible intervals.
+
+```{r}
+any_results = length(dir('results', pattern='six_month_unplanned')>0)
+if(any_results == FALSE){
+  data_for_surv = filter(for_crr_unplan$data, from =='d_dc_index_team') # do not use transitions from second admission (event has already happened)
+  outcome = 'd_unpl_adm1_m6' # unplanned admission
+  source('cox_models_six_months.R')
+  save(model.imp, model, residuals, ests, file='results/six_month_unplanned.RData')
+}
+if(any_results == TRUE){
+  load('results/six_month_unplanned.RData')
+}
+# tabulate the estimates
+digits = 2
+to_table = 
+  filter(ests, !str_detect(vars, pattern='Intercept')) %>%
+  mutate(HR = roundz(exp(mean),digits),
+              lower = roundz(exp(lower),digits),
+              upper = roundz(exp(upper),digits),
+              CI = paste(lower, ' to ', upper, sep='')) %>%
+  select(vars, HR, CI)
+ftab = flextable(to_table) %>%
+  theme_box() %>%
+  autofit()
+ftab
+```
+
+
+### Survival models of cumulative risk (death)
+
+The table shows the hazard ratios and 95% credible intervals.
+
+```{r, include=FALSE}
+data_for_surv = for_crr_death$data
+outcome = 'death_date'
+source('crr_models_six_months.R')
+```
+
+```{r}
+ftab = flextable(to_table) %>%
+  theme_box() %>%
+  autofit()
+ftab
+```
+
+
+### Survival models of cumulative risk (all cause readmission)
+
+The table shows the hazard ratios and 95% credible intervals.
+
+```{r, include=FALSE}
+data_for_surv = filter(for_crr_readmit$data, from =='d_dc_index_team') # do not use transitions 
+outcome = 'd_adm1_m6' # all-cause admission
+source('crr_models_six_months.R')
+```
+
+```{r}
+ftab = flextable(to_table) %>%
+  theme_box() %>%
+  autofit()
+ftab
+```
+
+### Survival models of cumulative risk (unplanned readmission)
+
+The table shows the hazard ratios and 95% credible intervals.
+
+```{r, include=FALSE}
+data_for_surv = filter(for_crr_unplan$data, from =='d_dc_index_team') # do not use transitions 
+outcome = 'd_unpl_adm1_m6' # unplanned admission
+source('crr_models_six_months.R')
+```
+
+```{r}
+ftab = flextable(to_table) %>%
+  theme_box() %>%
+  autofit()
+ftab
+```
+
+# Facility discharge
+
+Here we examine facility discharge (subacute care or new NH) versus home or acute care transfer. Deaths were excluded.
+
+```{r destination_facility}
+# use new variable from Alison
+for.baseline$dc_binary = as.numeric(for.baseline$facility_discharge == "facility discharge (subacute care or new NH)")
+for.model = dplyr::filter(for.baseline, dc_dest != 'Deceased') # remove deaths
+dmodel = glmer(dc_binary ~ intervention + I((age-76)/10) + I(gender=="Male") + I((cci_unadjusted_for_age-2)/2) + I((spmsq_score_admission-8)/(-3)) + I(adl_admission>0) + elective + (1|hospital), data=for.model, family=binomial())
+ests = data.frame(summary(dmodel)$coefficients)
+ests$var = rownames(ests)
+ci = exp(confint(dmodel, method='Wald')) # confidence interval; make into odds ratios
+colnames(ci) = c('lower','upper')
+ci = data.frame(ci)
+ci$var = rownames(ci)
+ests = left_join(ests, ci, by='var') %>%
+    mutate(
+      term = nice_rename(var),
+      p.value = format.pval(`Pr...z..`, eps=0.001, digits=3),
+           Estimate = exp(Estimate), # odds ratio
+           CI = paste(roundz(lower,2), ' to ', roundz(upper,2), sep='')) %>%
+  filter(!str_detect(var, pattern='Intercept')) %>% # remove intercepts
+  select(term, Estimate, CI, p.value) %>%
+  rename('OR' = 'Estimate')
+ftab = flextable(ests) %>%
+  theme_box() %>%
+  autofit() %>%
+  colformat_num(j=2, digits=2) 
+ftab
+```
+
+Older patients are more likely to experience facility discharge.
+
+# Facility discharge by subgroup
+
+Here we examine the increase in facility discharge probability in the pre-defined subgroups.
+We use an interaction between the intervention and the levels of the subgroup.
+
+```{r Home.age, include=FALSE}
+otype = 'primary'
+# make age subgroup
+data$group = 1
+data$group[data$age >= 75] = 2
+#
+formula = as.formula('dc_binary ~ intervention + age.c + I(gender=="Male") + cci_unadjusted_for_age.c + spmsq_score_admission.c + I(adl_admission>0) + elective + intervention:group + (1|hospital)')
+betas = vars = interaction.results = NULL # means and variances for imputed results
+for (k in 1:5){ # loop through imputations
+  # add imputed data
+  data.to.use = data
+  if(otype %in% c('varying','primary')){
+    data.to.use = dplyr::filter(data, source01 == 'Post-intervention') # just post-intervention data
+  }
+  data.to.use = dplyr::select(data.to.use, -iadl_baseline, -spmsq_score_admission) # remove missing variables
+  data.to.use = merge(data.to.use, impute[[k]], by='subject_num')
+  ## set up data
+  data.to.use$dc_binary = as.numeric(str_detect(data.to.use$facility_discharge, "facility")) # new outcome from Alison
+  data.to.use = dplyr::filter(data.to.use, dc_dest != 'Deceased') # remove deaths
+  data.to.use$age.c = (data.to.use$age -76)/10 # standardised for regression
+  data.to.use$cci_unadjusted_for_age.c = (data.to.use$cci_unadjusted_for_age -2)/2 # standardised for regression
+  data.to.use$spmsq_score_admission.c = (data.to.use$spmsq_score_admission-8)/(-3) # minus median, divide by IQR
+  # adjusting for hospital clustering
+  model = glmer(formula, data=data.to.use, family=binomial())
+  # parameters
+  betas[[k]] = fixef(model)
+  vars[[k]] = as.matrix(vcov(model))
+# interaction prediction
+  lambda1 = c(0,1,0,0,0,0,0,0,0) # just intervention
+  lambda2 = c(0,1,0,0,0,0,0,0,1) # plus interaction
+  e1 = esticon(model, L=lambda1)
+  e2 = esticon(model, L=lambda2)
+  iframe = rbind(e1, e2)
+  coef.index = length(fixef(model))
+  iframe = mutate(data.frame(iframe), subgroup='Age', est = c(1,2), pvalue=summary(model)$coefficients[coef.index,4], imp=k) %>% # add interaction p-value
+    dplyr::select(imp, subgroup, est, estimate, lwr, upr, pvalue) 
+  interaction.results = rbind(interaction.results, iframe)
+}
+# combine imputed results
+mi.res = summary(MIcombine(betas, vars))
+# probably crude combination of interaction results
+crude.age = interaction.results %>% dplyr::group_by(est, subgroup) %>%
+  dplyr::summarise(Mean=exp(mean(estimate)), lower=exp(mean(lwr)), upper=exp(mean(upr)), pval=mean(pvalue)) # make into odds ratios
+```
+
+```{r Home.frailty, include=FALSE}
+otype = 'primary'
+# make frailty subgroup
+    data$group = 1
+    data$group[data$frailty_index >= 0.25 & data$frailty_index < 0.40] = 2
+    data$group[data$frailty_index >= 0.40] = 3
+    data$group = factor(data$group) 
+#
+betas = vars = interaction.results = NULL # means and variances for imputed results
+for (k in 1:5){ # loop through imputations
+  # add imputed data
+  data.to.use = data
+  if(otype %in% c('varying','primary')){
+    data.to.use = dplyr::filter(data, source01 == 'Post-intervention') # just post-intervention data
+  }
+  data.to.use = dplyr::select(data.to.use, -iadl_baseline, -spmsq_score_admission) # remove missing variables
+  data.to.use = merge(data.to.use, impute[[k]], by='subject_num')
+  ## set up data
+  data.to.use$dc_binary = as.numeric(str_detect(data.to.use$facility_discharge, "facility")) # new
+  data.to.use = dplyr::filter(data.to.use, dc_dest != 'Deceased') # remove deaths
+  data.to.use$age.c = (data.to.use$age -76)/10 # standardised for regression
+  data.to.use$cci_unadjusted_for_age.c = (data.to.use$cci_unadjusted_for_age -2)/2 # standardised for regression
+  data.to.use$spmsq_score_admission.c = (data.to.use$spmsq_score_admission-8)/(-3) # minus median, divide by IQR
+  # adjusting for hospital clustering
+  model = glmer(formula, data=data.to.use, family=binomial())
+  # parameters
+  betas[[k]] = fixef(model)
+  vars[[k]] = as.matrix(vcov(model))
+# interaction prediction
+  lambda1 = c(0,1,0,0,0,0,0,0,0,0) # just intervention
+  lambda2 = c(0,1,0,0,0,0,0,0,1,0) # plus interaction 1
+  lambda3 = c(0,1,0,0,0,0,0,0,0,1) # plus interaction 2
+  e1 = esticon(model, L=lambda1)
+  e2 = esticon(model, L=lambda2)
+  e3 = esticon(model, L=lambda3)
+  iframe = rbind(e1, e2, e3)
+  coef.index = (length(fixef(model))-1):length(fixef(model))
+  iframe = dplyr::mutate(data.frame(iframe), subgroup='Frailty', est = c(1,2,3), pvalue=c(NA,summary(model)$coefficients[coef.index,4]), imp=k) %>% # add interaction p-value
+    dplyr::select(imp, subgroup, est, estimate, lwr, upr, pvalue) 
+  interaction.results = rbind(interaction.results, iframe)
+}
+# combine imputed results
+mi.res = summary(MIcombine(betas, vars))
+# probably crude combination of interaction results
+crude.frailty = interaction.results %>% dplyr::group_by(est, subgroup) %>%
+  dplyr::summarise(Mean=exp(mean(estimate)), lower=exp(mean(lwr)), upper=exp(mean(upr)), pval=mean(pvalue)) # make into odds ratios
+```
+
+
+```{r Home.hospital, include=FALSE}
+otype = 'primary'
+# make hospital subgroup
+data$group = as.factor(as.numeric(as.factor(data$hospital)))
+#
+betas = vars = interaction.results = NULL # means and variances for imputed results
+for (k in 1:5){ # loop through imputations
+  # add imputed data
+  data.to.use = data
+  if(otype %in% c('varying','primary')){
+    data.to.use = dplyr::filter(data, source01 == 'Post-intervention') # just post-intervention data
+  }
+  data.to.use = dplyr::select(data.to.use, -iadl_baseline, -spmsq_score_admission) # remove missing variables
+  data.to.use = merge(data.to.use, impute[[k]], by='subject_num')
+  ## set up data
+  data.to.use$dc_binary = as.numeric(str_detect(data.to.use$facility_discharge, "facility")) # new
+  data.to.use = dplyr::filter(data.to.use, dc_dest != 'Deceased') # remove deaths
+  data.to.use$age.c = (data.to.use$age -76)/10 # standardised for regression
+  data.to.use$cci_unadjusted_for_age.c = (data.to.use$cci_unadjusted_for_age -2)/2 # standardised for regression
+  data.to.use$spmsq_score_admission.c = (data.to.use$spmsq_score_admission-8)/(-3) # minus median, divide by IQR
+  # adjusting for hospital clustering
+  model = glmer(formula, data=data.to.use, family=binomial())
+  # parameters
+  betas[[k]] = fixef(model)
+  vars[[k]] = as.matrix(vcov(model))
+# interaction prediction
+  lambda1 = c(0,1,0,0,0,0,0,0,0,0,0) # hospital 1
+  lambda2 = c(0,1,0,0,0,0,0,0,1,0,0) # hospital 2
+  lambda3 = c(0,1,0,0,0,0,0,0,0,1,0) # hospital 3
+  lambda4 = c(0,1,0,0,0,0,0,0,0,0,1) # hospital 4
+  e1 = esticon(model, L=lambda1)
+  e2 = esticon(model, L=lambda2)
+  e3 = esticon(model, L=lambda3)
+  e4 = esticon(model, L=lambda4)
+  iframe = rbind(e1, e2, e3, e4)
+  coef.index = (length(fixef(model))-2):length(fixef(model))
+  iframe = dplyr::mutate(data.frame(iframe), subgroup='Hospital', est = c(1,2,3,4), pvalue=c(NA,summary(model)$coefficients[coef.index,4]), imp=k) %>% # add interaction p-value
+    dplyr::select(imp, subgroup, est, estimate, lwr, upr, pvalue) 
+  interaction.results = rbind(interaction.results, iframe)
+}
+# combine imputed results
+mi.res = summary(MIcombine(betas, vars))
+# probably crude combination of interaction results
+crude.hospital = interaction.results %>% dplyr::group_by(est, subgroup) %>%
+  dplyr::summarise(Mean=exp(mean(estimate)), lower=exp(mean(lwr)), upper=exp(mean(upr)), pval=mean(pvalue)) # make into odds ratios
+```
+
+
+##### Table of odds ratios and confidence intervals for Facility discharge
+
+```{r subgroup.table}
+to.plot  = bind_rows(crude.age, crude.frailty, crude.hospital)
+to.table = to.plot
+to.table$pval[1] = NA # blank double p-value
+to.table = dplyr::mutate(to.table, Mean = roundz(Mean,2),
+                         pval = format.pval(pval, eps=0.001, digits=3),
+                         CI = paste(roundz(lower,2), ' to ', roundz(upper,2), sep='')) %>% # make CI
+  dplyr::select(subgroup, est, Mean, CI, pval) %>%
+  dplyr::rename('Subgroup'='subgroup', 'Level'='est', '95% CI' = 'CI')
+ftab = flextable(to.table) %>%
+  theme_box() %>%
+  autofit()
+ftab
+```
+
+Subgroup levels are:
+
+* Age: 1 = 74 and under, 2 = 75 and over
+
+* Frailty: 1 = Under 0.25, 2 = 0.25 to 0.39, 3 = 0.40 and above,
+
+The p-values are for the interaction between the overall intervention effect and that subgroup. The first p-value per subgroup is missing because that level is modelled using the overall effect, hence there is no interaction.
+
+# Interaction with elective status
+
+Here we examine an interaction between the intervention and elective status. This is for the outcome of facility discharge.
+
+```{r}
+### model with interaction
+# use new variable from Alison
+for.baseline$dc_binary = as.numeric(for.baseline$facility_discharge == "facility discharge (subacute care or new NH)")
+for.model = dplyr::filter(for.baseline, dc_dest != 'Deceased') # remove deaths
+dmodel = glmer(dc_binary ~ intervention + I((age-76)/10) + I(gender=="Male") + I((cci_unadjusted_for_age-2)/2) + I((spmsq_score_admission-8)/(-3)) + I(adl_admission>0) + elective + elective:intervention + (1|hospital), data=for.model, family=binomial())
+ests = data.frame(summary(dmodel)$coefficients)
+ests$var = rownames(ests)
+ci = exp(confint(dmodel, method='Wald')) # confidence interval; make into odds ratios
+colnames(ci) = c('lower','upper')
+ci = data.frame(ci)
+ci$var = rownames(ci)
+ests = left_join(ests, ci, by='var') %>%
+    mutate(
+      term = nice_rename(var),
+      p.value = format.pval(`Pr...z..`, eps=0.001, digits=3),
+           Estimate = exp(Estimate), # odds ratio
+           CI = paste(roundz(lower,2), ' to ', roundz(upper,2), sep='')) %>%
+  filter(!str_detect(var, pattern='Intercept')) %>% # remove intercepts
+  select(term, Estimate, CI, p.value) %>%
+  rename('OR' = 'Estimate')
+ftab = flextable(ests) %>%
+  theme_box() %>%
+  autofit() %>%
+  colformat_num(j=2, digits=2) 
+ftab
+```
+
+# Appendix
+
+## Baseline hazards for the Cox model
+
+```{r, fig.width=7}
+## get the results
+k = 1 # just one imputation
+load('results/six_month_death.RData')
+haz1 = model[[k]]$summary.random$baseline.hazard
+load('results/six_month_allcause.RData')
+haz2 = model[[k]]$summary.random$baseline.hazard
+load('results/six_month_unplanned.RData')
+haz3 = model[[k]]$summary.random$baseline.hazard
+
+## plot
+to_plot = bind_rows(haz1, haz2, haz3, .id='model') %>%
+  mutate(model = case_when(
+    model==1 ~'Death',
+    model==2 ~'All-cause readmission',
+    model==3 ~'Unplanned readmission' )
+)
+bplot = ggplot(data=to_plot, aes(x=ID, y=`0.5quant`))+#, ymin=`0.025quant`, ymax=`0.975quant`))+
+#  geom_ribbon(alpha=0.5)+
+  geom_line(size=1.05)+
+  xlab('Days')+
+  ylab('Log-hazard')+
+  theme_bw()+
+  theme(panel.grid.minor= element_blank())+
+#  scale_x_continuous(breaks=seq(0,90,10))+
+  facet_wrap(~model, scales='free_y')
+bplot
+```
+
+## Residual checks
+
+```{r, include=FALSE}
+## load the residuals
+this_k = 1
+# get the residuals
+load('results/six_month_death.RData')
+res1 = filter(residuals, k==this_k)
+load('results/six_month_allcause.RData')
+res2 = filter(residuals, k==this_k)
+load('results/six_month_unplanned.RData')
+res3 = filter(residuals, k==this_k)
+
+# nicer labels
+to_plot = bind_rows(res1, res2, res3) %>%
+  mutate(model_num = case_when(
+    model == 'death_date' ~ 3,
+    model == 'd_adm1_m6' ~ 1,
+    model == 'd_unpl_adm1_m6' ~ 2
+  ),
+  model_num = factor(model_num, levels=1:3, labels=c('All cause admission','Unplanned admission','Death')),
+  to_num = case_when(
+    to == 'death_date' ~ 3,
+    to == 'd_adm1_m6' ~ 2,
+    to == 'd_unpl_adm1_m6' ~ 2,
+    to == 'censored' ~ 1
+  ) )
+```
+
+### a) Against age
+
+```{r, fig.width=7}
+nlplot = ggplot(data=to_plot, aes(x=age, y=martingale, col=factor(to_num)))+
+  scale_color_manual("Event", labels=c('Censored','Readmitted','Died'), values=c('grey','dodgerblue2','firebrick2'))+
+  geom_hline(yintercept=0, lty=2)+
+  geom_point()+
+  xlab('Age (years)')+
+  ylab('Martingale residual')+
+  theme_bw()+
+  facet_wrap(~model_num, scales='free_y')
+nlplot
+```
+
+There is a pattern in the death plot with older ages having larger residuals. This indicates a non-linear effect of age. However, we could not improve the model using a non-linear age (square or square-root) or adding an additional linear effect over age 80.
+
+### b) Against SPMSQ
+
+```{r, fig.width=7}
+nlplot = ggplot(data=to_plot, aes(x=spmsq_score_admission, y=martingale, col=factor(to_num)))+
+  scale_color_manual("Event", labels=c('Censored','Readmitted','Died'), values=c('grey','dodgerblue2','firebrick2'))+
+  geom_hline(yintercept=0, lty=2)+
+  geom_point()+
+  xlab('SPMSQ')+
+  ylab('Martingale residual')+
+  theme_bw()+
+  facet_wrap(~model_num, scales='free_y')
+nlplot
+```
+
+### c) Against Charlson
+
+```{r, fig.width=7}
+nlplot = ggplot(data=to_plot, aes(x=cci_unadjusted_for_age, y=martingale, col=factor(to_num)))+
+  scale_color_manual("Event", labels=c('Censored','Readmitted','Died'), values=c('grey','dodgerblue2','firebrick2'))+
+  geom_hline(yintercept=0, lty=2)+
+  geom_point()+
+  xlab('Charlson')+
+  ylab('Martingale residual')+
+  theme_bw()+
+  facet_wrap(~model_num, scales='free_y')
+nlplot
+jpeg('figures/residuals_charlson.jpg', width=7, height=4, units='in', res=300)
+print(nlplot)
+invisible(dev.off())
+```
+
+There are two odd residuals for the readmission for younger patients. The table below shows some of their key characteristics.
+
+```{r}
+f = filter(to_plot, 
+           model != 'death_date',
+           martingale < -100) %>% # look for unusually small residuals
+  select(subject_num, age, cci_unadjusted_for_age, spmsq_score_admission, elective, time, to_num, martingale) %>%
+  mutate(martingale = round(martingale)) %>%
+  rename(
+    'ID' = 'subject_num',
+    'Charlson' = 'cci_unadjusted_for_age',
+    'SPMSQ' = 'spmsq_score_admission')
+ftab = flextable(f) %>%
+  theme_box() %>%
+  autofit()
+ftab
+```
+
+This is the same patient in both residuals plots. They are relatively young with a high Charlson score. The high Charlson score for this patient was verified. 

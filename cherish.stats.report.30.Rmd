@@ -1,0 +1,426 @@
+---
+title: 'CHERISH: Collaborative for Hospitalised Elders Reducing the Impact of Stays
+  in Hospital. Analysis of 30-day outcomes.'
+author: "Adrian Barnett"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  word_document:
+    toc: yes
+    toc_depth: 2
+    reference_docx: rmarkdown-styles-reference.docx
+bibliography: refs.bib
+link-citations: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning=FALSE, message=FALSE, error=FALSE, comment='', dpi=400)
+options(width=1000) # Wide pages
+options(scipen=999) # avoid scientific presentation
+library(stringr)
+library(R2WinBUGS)
+library(dplyr)
+library(janitor)
+library(flextable)
+library(pander)
+#panderOptions('keep.trailing.zeros', TRUE) # causes weird error with summarytools
+panderOptions('table.emphasize.rownames', FALSE)
+panderOptions('table.split.table', Inf)
+panderOptions('table.split.cells', Inf)
+panderOptions('big.mark', ',')
+library(broom)
+#library(mitools) # for combining estimates from imputed data
+library(ordinal)
+library(summarytools)
+# global options for summary tools
+st_options(plain.ascii = FALSE,       # Always use this option in Rmd documents
+            style = "rmarkdown",        # This too
+            round.digits = 0, 
+            headings = FALSE, 
+            footnote = NA,             # Avoids footnotes which would clutter the results
+            subtitle.emphasis = TRUE  # Improves layout with some rmarkdown themes
+) 
+# graphics stuff
+library(ggplot2)
+g.theme = theme_bw() + theme(panel.grid.minor = element_blank())
+cbPalette = c("#999999", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+# 
+source('99_functions.R')
+## main data:
+load('data/Analysis.Ready30.RData') # from MakeDataFeb2021.R
+load('data/MICE.Results.impute.RData') # from impute.mice.R
+# merge imputed data
+data = dplyr::select(data, -iadl_baseline, -starts_with('spmsq')) %>% # remove missing variables
+    left_join(impute[[1]], by='subject_num') %>%
+  clean_names()
+
+# minor edits
+data  = mutate(data, 
+               age_c = (age-75)/5, # scale age
+               spmsq_score_admission_c = (spmsq_score_admission - 8)/(-3), # scale and also change direction
+               cci_unadjusted_for_age_c = (cci_unadjusted_for_age - 2)/2, #
+               # reverse order so that death is worst category
+               status_d30 = forcats::fct_rev(status_d30),
+               status_d30_adl = forcats::fct_rev(status_d30_adl),
+               status_d30_iadl = forcats::fct_rev(status_d30_iadl)) %>%
+  filter(source01 == 'Post-intervention') # just post-intervention
+
+# make binary baseline variables and gender variable for winbugs
+data = mutate(data, 
+              female = as.numeric(gender=='Female'), # numeric binary variables
+              baseline_a = as.numeric(adl_baseline>0),
+              baseline_i = as.numeric(iadl_baseline>0))
+
+# scramble intervention (turn off when ready)
+scramble = TRUE # 
+```
+
+# Scrambled intervention group
+
+This document contains the statistical analyses for the 30-day outcomes of the CHERISH study. The initial document was produced using a scrambled intervention group by randomly assigning participants to intervention or control wards. This allowed us to finalise the statistical analyses plan and ensure that all investigators understood the analyses before the real intervention was used.
+
+```{r scramble, include=FALSE}
+# scramble from now on
+if(scramble==TRUE){
+  set.seed(123456)
+  data$intervention = sample(data$intervention, size=nrow(data), replace=FALSE)
+  data$intervention_factor = sample(data$intervention_factor, size=nrow(data), replace=FALSE)
+  data$source01 = sample(data$source01, size=nrow(data), replace=FALSE)
+}
+```
+
+# Summary tables
+
+We only use the post-intervention data.
+
+### Functional measures at 30 days 
+
+#### ADL
+
+```{r, results='asis'}
+with(data, ctable(adl_total_d30, intervention_factor, dnn=c(' ',''), prop='c', round.digits=0, useNA='ifany'))
+```
+
+#### IADL
+
+```{r, results='asis'}
+with(data, ctable(iadl_total_d30, intervention_factor, dnn=c(' ',''), prop='c', round.digits=0, useNA='ifany'))
+```
+
+### 4-level composite 
+
+```{r, results='asis'}
+with(data, ctable(status_d30, intervention_factor, dnn=c(' ',''), prop='c', round.digits=0, useNA='ifany'))
+```
+
+
+### 4-level composite using ADL
+
+```{r, results='asis'}
+with(data, ctable(status_d30_adl, intervention_factor, dnn=c(' ',''), prop='c', round.digits=0, useNA='ifany'))
+```
+
+### 4-level composite using IADL
+
+```{r, results='asis'}
+with(data, ctable(status_d30_iadl, intervention_factor, dnn=c(' ',''), prop='c', round.digits=0, useNA='ifany'))
+```
+
+# Ordinal models
+
+We used an ordinal regression model to examine the ordered four categories of: 
+
+* 1. Dead
+* 2. Still in hospital
+* 3. Out of hospital level 1
+* 4. Out of hospital level 2
+
+The definition for categories 3 and 4 depends on the outcome. 
+
+The model examines the odds of being in a worse (higher) category [@Dobson18]. A logistic regression model examines the odds of one category compared to another, such as dead versus alive. In this model we have four categories and examine the odds of being in a worse category. In other words, for whatever category a patient is currently in, what are their odds of worsening.
+
+We adjusted for age and gender in the ordinal model. We also adjusted for baseline status, so for the ADL at 30 days model, we adjusted for baseline ADL. We also adjust for Charlson comorbidity score, admissions SPMSQ score and elective status. We also included a random intercept for each hospital to adjust for the potential correlation in results from patients from the same hospital.
+
+The model was fitted using a Bayesian approach.
+
+### Ordinal model for ADL
+
+For this model categories 3 and 4 are:
+
+* 3. Out of hospital but poorer ADL function
+* 4. Out of hospital recovered ADL function
+
+##### Odds ratios
+
+```{r, include=FALSE}
+# keep code, but do not show results
+omodel =  clm(status_d30_adl ~ age_c + gender + I(adl_baseline>0) + intervention_factor + cci_unadjusted_for_age_c + spmsq_score_admission_c + elective, data=data)
+res = tidy(omodel, conf.int = TRUE, exponentiate = TRUE) %>%
+  mutate(p.value = format.pval(p.value, eps=0.0001, digits=4)) %>%
+  filter(coef.type == 'location') %>% # just regression parameters
+  mutate(term = nice_rename(term, scramble=scramble),
+         estimate = roundz(estimate, 2),
+         CI = paste(roundz(conf.low, 2), ' to ', roundz(conf.high,2), sep='')
+         #p.value = format.pval(p.value, eps=0.0001, digits=4)
+         ) %>%
+  select(term, estimate, CI, p.value) 
+#pander(res, style='rmarkdown') # needed rmarkdown style
+```
+
+```{r, include=FALSE}
+# for text below
+age.odds = res$estimate[grep('Age', res$term)]
+# get fitted values
+pred <- predict(omodel, newdata = subset(data, select = -status_d30_adl))$fit
+class <- predict(omodel, newdata = subset(data, select = -status_d30_adl), type='class')$fit
+```
+
+```{r}
+## using bayes for random intercept
+## two versions, one with and one without hospital
+# a) with hospital
+bugs.model = 'bugs_latent.txt'
+# create external text file with bugs model
+bugs = file(bugs.model, 'w')
+cat('model{
+## Likelihood
+for (i in 1:N){
+  freq[i, 1:ncat] ~ dmulti(pi[i, 1:ncat], 1);
+# Cumulative probability of > category k given cutpoint
+  for (k in 1:ncat-1){
+    logit(Q[i,k]) <- inprod(X[i,1:n.beta], beta[1:n.beta]) + gamma.c[hosp[i]]-C[k];
+  }
+# Calculate probabilities
+  pi[i,1] <- 1 - Q[i,1]; # Pr(cat=1)=1-Pr(cat>1);
+  for (k in 2:(ncat-1)) {
+    pi[i,k] <- Q[i,k-1]-Q[i,k]; # Pr(cat>k-1)-Pr(cat>k);
+  }
+  pi[i,ncat] <- Q[i,ncat-1]; # Pr(cat=k)=Pr(cat>k-1);
+}
+## Priors
+for (k in 1:n.beta){beta[k] ~ dnorm(0,0.00001);}
+for (k in 1:4){
+  gamma[k] ~ dnorm(0, tau.gamma);
+  gamma.c[k] <- gamma[k] -mean.gamma
+} # random hospital effects
+mean.gamma <- mean(gamma[1:4])
+tau.gamma ~ dgamma(1,1)
+# ordered cut-offs
+C[1] <- 0; # for identifiability
+C[2] ~ dunif(C[1],C[3]);
+C[3] ~ dunif(C[2],10);
+}\n', file=bugs)
+close(bugs)
+
+# b) without hospital
+bugs.model = 'bugs_latent_no_hospital.txt'
+# create external text file with bugs model
+bugs = file(bugs.model, 'w')
+cat('model{
+## Likelihood
+for (i in 1:N){
+  freq[i, 1:ncat] ~ dmulti(pi[i, 1:ncat], 1);
+# Cumulative probability of > category k given cutpoint
+  for (k in 1:ncat-1){
+    logit(Q[i,k]) <- inprod(X[i,1:n.beta], beta[1:n.beta]) - C[k];
+  }
+# Calculate probabilities
+  pi[i,1] <- 1 - Q[i,1]; # Pr(cat=1)=1-Pr(cat>1);
+  for (k in 2:(ncat-1)) {
+    pi[i,k] <- Q[i,k-1]-Q[i,k]; # Pr(cat>k-1)-Pr(cat>k);
+  }
+  pi[i,ncat] <- Q[i,ncat-1]; # Pr(cat=k)=Pr(cat>k-1);
+}
+## Priors
+for (k in 1:n.beta){beta[k] ~ dnorm(0,0.00001);}
+# ordered cut-offs
+C[1] <- 0; # for identifiability
+C[2] ~ dunif(C[1],C[3]);
+C[3] ~ dunif(C[2],10);
+}\n', file=bugs)
+close(bugs)
+
+# run the ADL model
+dep_vars = vars = c('age_c','female','baseline_a','cci_unadjusted_for_age_c','spmsq_score_admission_c','elective','intervention','hospital') # list of dependent variables
+adl_ests = run_winbugs(indata=data, vars=dep_vars, outcome='ADL')
+adl_ests$dic$model = 'Full model'
+# for text below
+age.odds = adl_ests$ests$mean[grep('Age', adl_ests$ests$Variable)]
+# nice table
+ests = flextable(adl_ests$ests)
+ests = autofit(ests)
+ests
+```
+
+The chains converged well and the largest R-hat was `r roundz(adl_ests$max_rhat, digits=2)`.
+
+The estimates are odds ratios (and 95% credible intervals) for the outcome of being in a worse category. So each 5 year increase in age increases the odds of being a worse category by `r age.odds`.
+
+
+
+### Ordinal model for IADL
+
+For this model categories 3 and 4 are:
+
+* 3. Out of hospital but poorer IADL function
+* 4. Out of hospital recovered IADL function
+
+##### Odds ratios
+
+```{r, include=FALSE}
+# keep code but use Bayesian model below instead
+omodel =  clm(status_d30_iadl ~ age_c + gender + I(iadl_baseline>0) + intervention_factor + cci_unadjusted_for_age_c + spmsq_score_admission_c + elective, data=data)
+res = tidy(omodel, conf.int = TRUE, exponentiate = TRUE) %>%
+  mutate(p.value = format.pval(p.value, eps=0.0001, digits=4)) %>%
+  filter(coef.type == 'location') %>% # just regression parameters
+  mutate(term = nice_rename(term, scramble=scramble),
+         estimate = roundz(estimate, 2),
+         CI = paste(roundz(conf.low, 2), ' to ', roundz(conf.high,2), sep='')
+         #p.value = format.pval(p.value, eps=0.0001, digits=4)
+         ) %>%
+  select(term, estimate, CI, p.value) 
+pander(res, style='rmarkdown') # needed rmarkdown style
+```
+
+```{r}
+# as above model, but with IADL as outcome and baseline
+dep_vars = vars = c('age_c','female','baseline_i','cci_unadjusted_for_age_c','spmsq_score_admission_c','elective','intervention','hospital') # list of dependent variables
+iadl_ests = run_winbugs(indata=data, vars=dep_vars, outcome='IADL')
+iadl_ests$dic$model = 'Full model'
+# make nice table
+nice_table = flextable(iadl_ests$ests)
+nice_table = autofit(nice_table)
+nice_table
+```
+
+The chains converged well and the largest R-hat was `r roundz(iadl_ests$max_rhat, digits=2)`.
+
+# Is there some colinearity with elective surgery and ward?
+
+There may be a strong overlap with elective surgery and ward, increasing the risk of colinearity.
+The cross-tabulation of elective surgery by ward is below, showing the counts and row percents.
+
+```{r, results='asis'}
+data = mutate(data, elective_nice = factor(elective, levels=0:1, labels=c('No','Yes')))
+with(data, ctable(ward, elective_nice, dnn=c(' ',''), prop='r', round.digits=0, useNA='ifany'))
+```
+
+The table shows there are five wards that 5 or fewer elective patients. 
+
+To examine if there is colinearity, we can look at the change in estimates if we remove ward or elective surgery.
+
+#### Estimates without hospital (ADL)
+
+```{r}
+dep_vars = vars = c('age_c','female','baseline_a','cci_unadjusted_for_age_c','spmsq_score_admission_c','elective','intervention') # list of dependent variables
+adl_ests_no_hospital = run_winbugs(indata=data, vars=dep_vars, outcome='ADL')
+adl_ests_no_hospital$dic$model = 'Without hospital'
+# make nice table
+nice_table = flextable(adl_ests_no_hospital$ests)
+nice_table = autofit(nice_table)
+nice_table
+```
+
+#### Estimates without elective (ADL)
+
+```{r}
+dep_vars = vars = c('age_c','female','baseline_a','cci_unadjusted_for_age_c','spmsq_score_admission_c','hospital','intervention') # list of dependent variables
+adl_ests_no_elective = run_winbugs(indata=data, vars=dep_vars, outcome='ADL')
+adl_ests_no_elective$dic$model = 'Without elective'
+# make nice table
+nice_table = flextable(adl_ests_no_elective$ests)
+nice_table = autofit(nice_table)
+nice_table
+```
+
+#### Estimates without hospital (IADL)
+
+```{r}
+dep_vars = vars = c('age_c','female','baseline_i','cci_unadjusted_for_age_c','spmsq_score_admission_c','elective','intervention') # list of dependent variables
+iadl_ests_no_hospital = run_winbugs(indata=data, vars=dep_vars, outcome='IADL')
+iadl_ests_no_hospital$dic$model = 'Without hospital'
+# make nice table
+nice_table = flextable(iadl_ests_no_hospital$ests)
+nice_table = autofit(nice_table)
+nice_table
+```
+
+
+#### Estimates without elective (IADL)
+
+```{r}
+dep_vars = vars = c('age_c','female','baseline_i','cci_unadjusted_for_age_c','spmsq_score_admission_c','hospital','intervention') # list of dependent variables
+iadl_ests_no_elective = run_winbugs(indata=data, vars=dep_vars, outcome='IADL')
+iadl_ests_no_elective$dic$model = 'Without elective'
+# make nice table
+nice_table = flextable(iadl_ests_no_elective$ests)
+nice_table = autofit(nice_table)
+nice_table
+```
+
+### Plot of estimates
+
+Here we compare the estimates for the three models.
+
+```{r, fig.width=8}
+## prepare data
+# IADL
+iadl_ests$ests$outcome = 'IADL'
+iadl_ests$ests$model = 'Full model'
+iadl_ests_no_elective$ests$outcome = 'IADL'
+iadl_ests_no_elective$ests$model = 'No elective'
+iadl_ests_no_hospital$ests$outcome = 'IADL'
+iadl_ests_no_hospital$ests$model = 'No hospital'
+# ADL
+adl_ests$ests$outcome = 'ADL'
+adl_ests$ests$model = 'Full model'
+adl_ests_no_elective$ests$outcome = 'ADL'
+adl_ests_no_elective$ests$model = 'No elective'
+adl_ests_no_hospital$ests$outcome = 'ADL'
+adl_ests_no_hospital$ests$model = 'No hospital'
+# concatenate
+to_plot = bind_rows(iadl_ests$ests,
+                    iadl_ests_no_hospital$ests,
+                    iadl_ests_no_elective$ests,
+                    adl_ests$ests,
+                    adl_ests_no_hospital$ests,
+                    adl_ests_no_elective$ests) %>%
+  mutate(mean = as.numeric(mean))
+compare_plot = ggplot(to_plot, aes(x=variable, y=mean, col=model, shape=model))+
+  geom_point(size=4)+
+  scale_color_manual(NULL, values=c("#FF7F24", "#B4EEB4", "#1C86EE"))+
+  scale_shape_manual(NULL, values=0:2)+
+  xlab('')+
+  geom_hline(lty=2, yintercept=1)+
+  theme_bw()+
+  coord_flip()+
+  facet_wrap(~outcome)
+compare_plot
+```
+
+##### Deviance information criterion
+
+We can compare the fit of the model using the deviance information criterion. The lower the DIC, the better the model. "pD" is the approximate number of parameters used by the model, which does not have to be an integer in a Bayesian model. 
+
+```{r}
+# combine DIC estimates
+DIC = bind_rows(adl_ests$dic,
+                adl_ests_no_elective$dic,
+                adl_ests_no_hospital$dic,
+                iadl_ests$dic,
+                iadl_ests_no_elective$dic,
+                iadl_ests_no_hospital$dic) %>%
+  select('model','outcome','pD',"DIC") %>%
+  mutate(pD = roundz(pD, 1),
+         DIC = roundz(DIC, 1))
+DIC = flextable(DIC)
+DIC = autofit(DIC)
+DIC
+```
+
+The table shows the three alternative models for ADL and IADL. The best model for ADL is the full model with both elective and hospital. The best for for IADL is without elective, although it is not clearly better than the full model, but could be preferred on the grounds of parsimony. 
+
+### Software
+
+This report and the statistical analyses were made using Rmarkdown with `r version$version.string`.
+
+### References
